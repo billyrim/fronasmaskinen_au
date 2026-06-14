@@ -103,6 +103,7 @@ FronasmaskinenAudioProcessorEditor::FronasmaskinenAudioProcessorEditor (Fronasma
     addAndMakeVisible (titleLabel);
 
     addAndMakeVisible (loadButton);
+    loadButton.setEnabled (true);
     loadButton.addListener (this);
     addAndMakeVisible (auditionButton);
     auditionButton.addListener (this);
@@ -186,6 +187,7 @@ void FronasmaskinenAudioProcessorEditor::resized()
     loopPointButton.setBounds (transport.removeFromLeft (140).reduced (4, 2));
     releaseButton.setBounds (transport.removeFromLeft (110).reduced (4, 2));
     randomButton.setBounds (transport.removeFromLeft (140).reduced (4, 2));
+    loadButton.toFront (false);
 
     area.removeFromTop (6);
 
@@ -335,6 +337,7 @@ void FronasmaskinenAudioProcessorEditor::refreshFromProcessor()
                            + " | MIDI: Logic C1-A1 triggers S1-S10", juce::dontSendNotification);
     playButton.setButtonText (audioProcessor.isPreviewPlaying() ? "Pause" : "Play");
     loopPointButton.setButtonText (audioProcessor.hasPendingLoopStart() ? "Set loop end" : "Set loop start");
+    loadButton.setEnabled (true);
     playButton.setEnabled (audioProcessor.hasSample());
     loopPointButton.setEnabled (audioProcessor.hasSample() && audioProcessor.isPreviewPlaying() && ! audioProcessor.hasPreviewLoop());
     releaseButton.setEnabled (audioProcessor.hasPreviewLoop());

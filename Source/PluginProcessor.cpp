@@ -597,6 +597,10 @@ bool FronasmaskinenAudioProcessor::selectSlot (int slotIndex)
     selectionStartSeconds = slot.baseStartSeconds;
     selectionEndSeconds = slot.baseEndSeconds;
     activateLoopFromSelectedSlot();
+
+    if (preview.playing)
+        preview.positionSamples = preview.loopStartSeconds * sampleBufferRate;
+
     return true;
 }
 

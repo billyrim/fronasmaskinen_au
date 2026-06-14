@@ -12,6 +12,17 @@ cmake --build build --config Debug
 The AU target is configured with `COPY_PLUGIN_AFTER_BUILD TRUE`, so a successful build should copy
 the component to the default user Audio Unit location for Logic validation.
 
+## Tests
+
+```bash
+cmake --build build --config Debug --target FronasmaskinenAUTests
+./build/FronasmaskinenAUTests_artefacts/Debug/FronasmaskinenAUTests
+```
+
+The processor tests cover sample loading, waveform thumbnail generation, preview seek/play, two-click
+loop creation, slot activation, trim/gain persistence, release, random start, mouse-style slot
+auditioning, and MIDI triggering for S1-S10.
+
 ## Prototype workflow
 
 1. Open the AU Instrument in Logic.

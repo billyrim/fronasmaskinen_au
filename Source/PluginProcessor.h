@@ -5,6 +5,10 @@
 #include <atomic>
 #include <vector>
 
+#ifndef JucePlugin_Name
+#define JucePlugin_Name "Fronasmaskinen"
+#endif
+
 class FronasmaskinenAudioProcessor final : public juce::AudioProcessor
 {
 public:
