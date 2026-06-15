@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "../Source/PluginProcessor.h"
+#include "../Source/PluginEditor.h"
 
 namespace
 {
@@ -57,6 +58,23 @@ void processMidiNote (FronasmaskinenAudioProcessor& processor, int noteNumber, b
                           : juce::MidiMessage::noteOff (1, noteNumber),
                    0);
     processor.processBlock (buffer, midi);
+}
+
+float renderMidiNoteRms (FronasmaskinenAudioProcessor& processor, int noteNumber)
+{
+    juce::AudioBuffer<float> buffer (2, 2048);
+    juce::MidiBuffer midi;
+    midi.addEvent (juce::MidiMessage::noteOn (1, noteNumber, (juce::uint8) 100), 0);
+    processor.processBlock (buffer, midi);
+    return buffer.getRMSLevel (0, 0, buffer.getNumSamples());
+}
+
+float renderPreviewRms (FronasmaskinenAudioProcessor& processor)
+{
+    juce::AudioBuffer<float> buffer (2, 2048);
+    juce::MidiBuffer midi;
+    processor.processBlock (buffer, midi);
+    return buffer.getRMSLevel (0, 0, buffer.getNumSamples());
 }
 
 void seekAndSetLoopPoint (FronasmaskinenAudioProcessor& processor, double seconds)
@@ -261,6 +279,163 @@ void testSlotMouseAndMidiTriggers()
     sample.deleteFile();
 }
 
+void testMidiTriggerUpdatesPausedPreviewLoop()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createTestSample();
+    expect (processor.loadAudioFile (sample), "Sample should load");
+    processor.prepareToPlay (44100.0, 256);
+
+    processor.setSelection (0.10, 0.18);
+    expect (processor.saveSelectionToSlot (0), "Should save S1");
+    processor.setSelection (0.42, 0.50);
+    expect (processor.saveSelectionToSlot (1), "Should save S2");
+
+    expect (! processor.isPreviewPlaying(), "Preview should be paused before MIDI trigger");
+    expectNear (processor.getPreviewLoopStartSeconds(), 0.42, epsilon, "S2 should be the active loop before MIDI");
+
+    processMidiNote (processor, FronasmaskinenAudioProcessor::baseNote, true);
+    expect (processor.getSelectedSlotIndex() == 0, "MIDI-triggered S1 should become selected while preview is paused");
+    expectNear (processor.getPreviewLoopStartSeconds(), 0.10, epsilon, "MIDI-triggered S1 should update preview loop start");
+    expectNear (processor.getPreviewLoopEndSeconds(), 0.18, epsilon, "MIDI-triggered S1 should update preview loop end");
+    expectNear (processor.getPreviewPositionSeconds(), 0.10, epsilon, "MIDI-triggered S1 should move preview playhead to loop start");
+
+    sample.deleteFile();
+}
+
+void testSlotGainAffectsMidiVoiceLevel()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createTestSample();
+    expect (processor.loadAudioFile (sample), "Sample should load");
+    processor.prepareToPlay (44100.0, 2048);
+
+    processor.setSelection (0.05, 0.35);
+    expect (processor.saveSelectionToSlot (0), "Should save S1");
+
+    processor.setSelectedSlotGainDb (0.0f);
+    const auto unityRms = renderMidiNoteRms (processor, FronasmaskinenAudioProcessor::baseNote);
+    expect (unityRms > 0.001f, "Unity-gain MIDI voice should render audible output");
+
+    processor.setSelectedSlotGainDb (-12.0f);
+    const auto quietRms = renderMidiNoteRms (processor, FronasmaskinenAudioProcessor::baseNote);
+    expect (quietRms < unityRms * 0.40f, "Negative slot gain should reduce MIDI voice level");
+
+    processor.setSelectedSlotGainDb (6.0f);
+    const auto loudRms = renderMidiNoteRms (processor, FronasmaskinenAudioProcessor::baseNote);
+    expect (loudRms > unityRms * 1.70f, "Positive slot gain should increase MIDI voice level");
+
+    sample.deleteFile();
+}
+
+void testSlotGainAffectsPreviewLoopLevel()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createTestSample();
+    expect (processor.loadAudioFile (sample), "Sample should load");
+    processor.prepareToPlay (44100.0, 2048);
+
+    processor.setSelection (0.05, 0.35);
+    expect (processor.saveSelectionToSlot (0), "Should save S1");
+
+    processor.setSelectedSlotGainDb (0.0f);
+    processor.playPreview();
+    const auto unityRms = renderPreviewRms (processor);
+    expect (unityRms > 0.001f, "Unity-gain preview loop should render audible output");
+
+    expect (processor.selectSlot (0), "Should reset preview to S1");
+    processor.setSelectedSlotGainDb (-12.0f);
+    processor.playPreview();
+    const auto quietRms = renderPreviewRms (processor);
+    expect (quietRms < unityRms * 0.40f, "Negative slot gain should reduce preview loop level");
+
+    expect (processor.selectSlot (0), "Should reset preview to S1 again");
+    processor.setSelectedSlotGainDb (6.0f);
+    processor.playPreview();
+    const auto loudRms = renderPreviewRms (processor);
+    expect (loudRms > unityRms * 1.70f, "Positive slot gain should increase preview loop level");
+
+    sample.deleteFile();
+}
+
+void testWaveformFileDragAndDropLoadsSample()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    auto waveform = WaveformComponent (processor);
+    const auto sample = createTestSample();
+
+    juce::StringArray files;
+    files.add (sample.getFullPathName());
+    expect (waveform.isInterestedInFileDrag (files), "Waveform should accept WAV files dragged from Finder");
+
+    waveform.filesDropped (files, 10, 10);
+    expect (processor.hasSample(), "Dropping a WAV on the waveform should load it");
+    expect (processor.getLoadedFilePath() == sample.getFullPathName(), "Dropped file path should be stored");
+
+    sample.deleteFile();
+}
+
+void testSlotMoveSwapsFilledSlots()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createTestSample();
+    expect (processor.loadAudioFile (sample), "Sample should load");
+
+    processor.setSelection (0.10, 0.18);
+    expect (processor.saveSelectionToSlot (0), "Should save S1");
+    processor.setSelection (0.30, 0.38);
+    expect (processor.saveSelectionToSlot (1), "Should save S2");
+    processor.setSelection (0.50, 0.58);
+    expect (processor.saveSelectionToSlot (2), "Should save S3");
+
+    expect (processor.selectSlot (0), "Should select S1 before moving it");
+    expect (processor.moveSlotRight (0), "S1 should move right when S2 is filled");
+    expectNear (processor.getSlot (0).baseStartSeconds, 0.30, epsilon, "S2 should move into slot 1");
+    expectNear (processor.getSlot (1).baseStartSeconds, 0.10, epsilon, "S1 should move into slot 2");
+    expectNear (processor.getSlot (2).baseStartSeconds, 0.50, epsilon, "S3 should stay in slot 3");
+    expect (processor.getSelectedSlotIndex() == 1, "Selection should follow moved S1 to slot 2");
+    expectNear (processor.getPreviewLoopStartSeconds(), 0.10, epsilon, "Active loop should follow moved S1");
+
+    expect (processor.moveSlotRight (1), "Moved S1 should move right again when S3 is filled");
+    expectNear (processor.getSlot (0).baseStartSeconds, 0.30, epsilon, "S2 should remain first");
+    expectNear (processor.getSlot (1).baseStartSeconds, 0.50, epsilon, "S3 should move into slot 2");
+    expectNear (processor.getSlot (2).baseStartSeconds, 0.10, epsilon, "S1 should move into slot 3");
+    expect (processor.getSelectedSlotIndex() == 2, "Selection should follow moved S1 to slot 3");
+
+    expect (processor.moveSlotLeft (2), "S1 should move left when S3 is filled");
+    expectNear (processor.getSlot (1).baseStartSeconds, 0.10, epsilon, "S1 should move back into slot 2");
+    expectNear (processor.getSlot (2).baseStartSeconds, 0.50, epsilon, "S3 should move back into slot 3");
+    expect (processor.getSelectedSlotIndex() == 1, "Selection should follow moved S1 back to slot 2");
+
+    sample.deleteFile();
+}
+
+void testSlotMoveRejectsEdgesAndEmptyTargets()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createTestSample();
+    expect (processor.loadAudioFile (sample), "Sample should load");
+
+    processor.setSelection (0.10, 0.18);
+    expect (processor.saveSelectionToSlot (0), "Should save S1");
+    processor.setSelection (0.30, 0.38);
+    expect (processor.saveSelectionToSlot (1), "Should save S2");
+    processor.setSelection (0.50, 0.58);
+    expect (processor.saveSelectionToSlot (2), "Should save S3");
+
+    expect (! processor.moveSlotLeft (0), "S1 should not move left");
+    expect (! processor.moveSlotRight (2), "Last filled slot before an empty slot should not move right");
+    expect (! processor.moveSlotRight (3), "Empty S4 should not move right");
+    expect (! processor.moveSlotLeft (3), "Empty S4 should not move left");
+
+    expectNear (processor.getSlot (0).baseStartSeconds, 0.10, epsilon, "S1 should remain first");
+    expectNear (processor.getSlot (1).baseStartSeconds, 0.30, epsilon, "S2 should remain second");
+    expectNear (processor.getSlot (2).baseStartSeconds, 0.50, epsilon, "S3 should remain third");
+    expect (! processor.getSlot (3).filled, "S4 should stay empty");
+
+    sample.deleteFile();
+}
+
 void runTest (const char* name, void (*test)())
 {
     test();
@@ -280,6 +455,12 @@ int main()
         runTest ("release and random start", testReleaseAndRandomStart);
         runTest ("slot selection moves playhead during preview", testSelectingSlotDuringPreviewMovesPlayheadIntoSlot);
         runTest ("slot mouse and MIDI triggers", testSlotMouseAndMidiTriggers);
+        runTest ("MIDI trigger updates paused preview loop", testMidiTriggerUpdatesPausedPreviewLoop);
+        runTest ("slot gain affects MIDI voice level", testSlotGainAffectsMidiVoiceLevel);
+        runTest ("slot gain affects preview loop level", testSlotGainAffectsPreviewLoopLevel);
+        runTest ("waveform file drag and drop loads sample", testWaveformFileDragAndDropLoadsSample);
+        runTest ("slot move swaps filled slots", testSlotMoveSwapsFilledSlots);
+        runTest ("slot move rejects edges and empty targets", testSlotMoveRejectsEdgesAndEmptyTargets);
     }
     catch (const TestFailure& failure)
     {

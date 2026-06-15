@@ -78,6 +78,8 @@ public:
 
     bool saveSelectionToSlot (int slotIndex);
     bool selectSlot (int slotIndex);
+    bool moveSlotLeft (int slotIndex);
+    bool moveSlotRight (int slotIndex);
     void clearSlot (int slotIndex);
     void setSelectedSlotTrim (double startTrimSeconds, double endTrimSeconds);
     void setSelectedSlotGainDb (float gainDb);
@@ -151,6 +153,7 @@ private:
     float readSample (int channel, double absoluteSample) const;
     std::pair<double, double> effectiveSlotBoundsSamples (const Slot& slot) const;
     std::pair<double, double> effectiveSelectedSlotBoundsSeconds() const;
+    bool swapFilledSlots (int slotIndex, int targetSlotIndex);
     bool saveLoopToNextSlot (double startSeconds, double endSeconds);
     void activateLoopFromSelectedSlot();
     void rebuildWaveformThumbnail();

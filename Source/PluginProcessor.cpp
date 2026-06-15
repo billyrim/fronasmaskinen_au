@@ -88,6 +88,8 @@ void FronasmaskinenAudioProcessor::noteOn (int noteNumber, float velocity)
         return;
 
     selectedSlot = slotIndex;
+    activateLoopFromSelectedSlot();
+    preview.positionSamples = preview.loopStartSeconds * sampleBufferRate;
     lastTriggeredSlot.store (slotIndex);
     startVoice (slotIndex, noteNumber, velocity);
 }
@@ -239,6 +241,9 @@ void FronasmaskinenAudioProcessor::renderPreview (juce::AudioBuffer<float>& outp
     auto loopLength = loopEnd - loopStart;
     const auto canLoop = preview.loopActive && loopLength >= 1.0;
     const auto seamFade = canLoop ? juce::jlimit (1, (int) std::floor (loopLength * 0.45), crossfadeSamples) : 1;
+    auto gain = 1.0f;
+    if (canLoop && selectedSlot >= 0 && selectedSlot < slotCount && slots[(size_t) selectedSlot].filled)
+        gain = dbToGain (slots[(size_t) selectedSlot].gainDb);
 
     for (int sample = 0; sample < numSamples; ++sample)
     {
@@ -303,7 +308,7 @@ void FronasmaskinenAudioProcessor::renderPreview (juce::AudioBuffer<float>& outp
                 value = (float) ((value * (1.0 - xfade)) + (wrapped * xfade));
             }
 
-            output.addSample (channel, startSample + sample, value * preview.envelope);
+            output.addSample (channel, startSample + sample, value * preview.envelope * gain);
         }
 
         preview.positionSamples += sampleBufferRate / hostSampleRate;
@@ -604,6 +609,16 @@ bool FronasmaskinenAudioProcessor::selectSlot (int slotIndex)
     return true;
 }
 
+bool FronasmaskinenAudioProcessor::moveSlotLeft (int slotIndex)
+{
+    return swapFilledSlots (slotIndex, slotIndex - 1);
+}
+
+bool FronasmaskinenAudioProcessor::moveSlotRight (int slotIndex)
+{
+    return swapFilledSlots (slotIndex, slotIndex + 1);
+}
+
 void FronasmaskinenAudioProcessor::clearSlot (int slotIndex)
 {
     if (slotIndex < 0 || slotIndex >= slotCount)
@@ -711,6 +726,47 @@ std::pair<double, double> FronasmaskinenAudioProcessor::effectiveSelectedSlotBou
 
     const auto bounds = effectiveSlotBoundsSamples (slots[(size_t) selectedSlot]);
     return { bounds.first / sampleBufferRate, bounds.second / sampleBufferRate };
+}
+
+bool FronasmaskinenAudioProcessor::swapFilledSlots (int slotIndex, int targetSlotIndex)
+{
+    if (slotIndex < 0 || slotIndex >= slotCount || targetSlotIndex < 0 || targetSlotIndex >= slotCount)
+        return false;
+
+    const juce::ScopedLock lock (dataLock);
+    auto& slot = slots[(size_t) slotIndex];
+    auto& targetSlot = slots[(size_t) targetSlotIndex];
+    if (! slot.filled || ! targetSlot.filled)
+        return false;
+
+    std::swap (slot, targetSlot);
+
+    if (selectedSlot == slotIndex)
+        selectedSlot = targetSlotIndex;
+    else if (selectedSlot == targetSlotIndex)
+        selectedSlot = slotIndex;
+
+    for (auto& voice : voices)
+    {
+        if (voice.slotIndex == slotIndex)
+            voice.slotIndex = targetSlotIndex;
+        else if (voice.slotIndex == targetSlotIndex)
+            voice.slotIndex = slotIndex;
+    }
+
+    if (lastTriggeredSlot.load() == slotIndex)
+        lastTriggeredSlot.store (targetSlotIndex);
+    else if (lastTriggeredSlot.load() == targetSlotIndex)
+        lastTriggeredSlot.store (slotIndex);
+
+    if (selectedSlot >= 0)
+    {
+        selectionStartSeconds = slots[(size_t) selectedSlot].baseStartSeconds;
+        selectionEndSeconds = slots[(size_t) selectedSlot].baseEndSeconds;
+        activateLoopFromSelectedSlot();
+    }
+
+    return true;
 }
 
 bool FronasmaskinenAudioProcessor::saveLoopToNextSlot (double startSeconds, double endSeconds)

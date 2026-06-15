@@ -2,9 +2,10 @@
 
 namespace
 {
-juce::Rectangle<int> removeRow (juce::Rectangle<int>& area, int height)
+bool isSupportedAudioFile (const juce::File& file)
 {
-    return area.removeFromTop (height).reduced (0, 4);
+    const auto extension = file.getFileExtension().toLowerCase();
+    return file.existsAsFile() && (extension == ".wav" || extension == ".aif" || extension == ".aiff");
 }
 }
 
@@ -81,6 +82,28 @@ void WaveformComponent::mouseDown (const juce::MouseEvent& event)
     repaint();
 }
 
+bool WaveformComponent::isInterestedInFileDrag (const juce::StringArray& files)
+{
+    for (const auto& path : files)
+        if (isSupportedAudioFile (juce::File (path)))
+            return true;
+
+    return false;
+}
+
+void WaveformComponent::filesDropped (const juce::StringArray& files, int, int)
+{
+    for (const auto& path : files)
+    {
+        const auto file = juce::File (path);
+        if (isSupportedAudioFile (file) && processor.loadAudioFile (file))
+        {
+            repaint();
+            return;
+        }
+    }
+}
+
 void WaveformComponent::drawMarker (juce::Graphics& g, double seconds, juce::Colour colour, float thickness)
 {
     const auto duration = processor.getSampleDurationSeconds();
@@ -95,7 +118,7 @@ void WaveformComponent::drawMarker (juce::Graphics& g, double seconds, juce::Col
 FronasmaskinenAudioProcessorEditor::FronasmaskinenAudioProcessorEditor (FronasmaskinenAudioProcessor& p)
     : AudioProcessorEditor (&p), audioProcessor (p), waveform (p)
 {
-    setSize (760, 640);
+    setSize (760, 520);
     setWantsKeyboardFocus (true);
 
     titleLabel.setText ("Fronasmaskinen AU v0.1", juce::dontSendNotification);
@@ -105,8 +128,6 @@ FronasmaskinenAudioProcessorEditor::FronasmaskinenAudioProcessorEditor (Fronasma
     addAndMakeVisible (loadButton);
     loadButton.setEnabled (true);
     loadButton.addListener (this);
-    addAndMakeVisible (auditionButton);
-    auditionButton.addListener (this);
     addAndMakeVisible (playButton);
     addAndMakeVisible (loopPointButton);
     addAndMakeVisible (releaseButton);
@@ -115,12 +136,6 @@ FronasmaskinenAudioProcessorEditor::FronasmaskinenAudioProcessorEditor (Fronasma
 
     for (auto* button : { &playButton, &loopPointButton, &releaseButton, &randomButton })
         button->addListener (this);
-
-    for (auto* label : { &fileLabel, &selectedLabel, &durationLabel, &midiLabel })
-    {
-        label->setJustificationType (juce::Justification::centredLeft);
-        addAndMakeVisible (*label);
-    }
 
     configureSlider (startTrimSlider, startTrimLabel, "Start trim");
     configureSlider (endTrimSlider, endTrimLabel, "End trim");
@@ -138,6 +153,14 @@ FronasmaskinenAudioProcessorEditor::FronasmaskinenAudioProcessorEditor (Fronasma
         slotButtons[(size_t) i].setButtonText ("S" + juce::String (i + 1));
         slotButtons[(size_t) i].addListener (this);
         addAndMakeVisible (slotButtons[(size_t) i]);
+
+        moveLeftButtons[(size_t) i].setButtonText ("<");
+        moveLeftButtons[(size_t) i].addListener (this);
+        addAndMakeVisible (moveLeftButtons[(size_t) i]);
+
+        moveRightButtons[(size_t) i].setButtonText (">");
+        moveRightButtons[(size_t) i].addListener (this);
+        addAndMakeVisible (moveRightButtons[(size_t) i]);
 
         clearButtons[(size_t) i].setButtonText ("x");
         clearButtons[(size_t) i].addListener (this);
@@ -161,13 +184,6 @@ void FronasmaskinenAudioProcessorEditor::resized()
     auto header = area.removeFromTop (48);
     titleLabel.setBounds (header.removeFromLeft (320));
     loadButton.setBounds (header.removeFromRight (140).reduced (0, 6));
-    auditionButton.setBounds (header.removeFromRight (150).reduced (0, 6));
-
-    fileLabel.setBounds (removeRow (area, 28));
-    durationLabel.setBounds (removeRow (area, 24));
-    selectedLabel.setBounds (removeRow (area, 28));
-    midiLabel.setBounds (removeRow (area, 24));
-    area.removeFromTop (10);
 
     waveform.setBounds (area.removeFromTop (150).reduced (0, 4));
 
@@ -178,8 +194,11 @@ void FronasmaskinenAudioProcessorEditor::resized()
     for (int i = 0; i < FronasmaskinenAudioProcessor::slotCount; ++i)
     {
         auto cell = slotRow.removeFromLeft (slotWidth).reduced (4);
-        slotButtons[(size_t) i].setBounds (cell.removeFromTop (52));
-        clearButtons[(size_t) i].setBounds (cell.removeFromTop (26).reduced (10, 0));
+        auto moveRow = cell.removeFromTop (20);
+        moveLeftButtons[(size_t) i].setBounds (moveRow.removeFromLeft (24));
+        moveRightButtons[(size_t) i].setBounds (moveRow.removeFromLeft (24).reduced (2, 0));
+        slotButtons[(size_t) i].setBounds (cell.removeFromTop (40));
+        clearButtons[(size_t) i].setBounds (cell.removeFromTop (22).reduced (10, 0));
     }
 
     auto transport = area.removeFromTop (42).reduced (0, 4);
@@ -261,6 +280,20 @@ void FronasmaskinenAudioProcessorEditor::buttonClicked (juce::Button* button)
             return;
         }
 
+        if (button == &moveLeftButtons[(size_t) i])
+        {
+            audioProcessor.moveSlotLeft (i);
+            refreshFromProcessor();
+            return;
+        }
+
+        if (button == &moveRightButtons[(size_t) i])
+        {
+            audioProcessor.moveSlotRight (i);
+            refreshFromProcessor();
+            return;
+        }
+
         if (button == &clearButtons[(size_t) i])
         {
             audioProcessor.clearSlot (i);
@@ -280,19 +313,6 @@ bool FronasmaskinenAudioProcessorEditor::keyPressed (const juce::KeyPress& key)
     }
 
     return false;
-}
-
-void FronasmaskinenAudioProcessorEditor::buttonStateChanged (juce::Button* button)
-{
-    if (button != &auditionButton)
-        return;
-
-    if (auditionButton.isDown())
-        audioProcessor.auditionSelectedSlot();
-    else
-        audioProcessor.stopAudition();
-
-    refreshFromProcessor();
 }
 
 void FronasmaskinenAudioProcessorEditor::sliderValueChanged (juce::Slider* slider)
@@ -331,10 +351,6 @@ void FronasmaskinenAudioProcessorEditor::configureSlider (juce::Slider& slider, 
 
 void FronasmaskinenAudioProcessorEditor::refreshFromProcessor()
 {
-    const auto path = audioProcessor.getLoadedFilePath();
-    fileLabel.setText (path.isEmpty() ? "No sample loaded" : path, juce::dontSendNotification);
-    durationLabel.setText ("Duration: " + secondsText (audioProcessor.getSampleDurationSeconds())
-                           + " | MIDI: Logic C1-A1 triggers S1-S10", juce::dontSendNotification);
     playButton.setButtonText (audioProcessor.isPreviewPlaying() ? "Pause" : "Play");
     loopPointButton.setButtonText (audioProcessor.hasPendingLoopStart() ? "Set loop end" : "Set loop start");
     loadButton.setEnabled (true);
@@ -346,18 +362,6 @@ void FronasmaskinenAudioProcessorEditor::refreshFromProcessor()
     syncSelectedSlotControls();
 
     const auto selected = audioProcessor.getSelectedSlotIndex();
-    selectedLabel.setText (selected >= 0 ? "Selected: S" + juce::String (selected + 1)
-                                         : "Selected: none", juce::dontSendNotification);
-    auditionButton.setEnabled (selected >= 0 && audioProcessor.getSlot (selected).filled);
-
-    const auto lastNote = audioProcessor.getLastMidiNote();
-    const auto triggeredSlot = audioProcessor.getLastTriggeredSlot();
-    auto midiText = lastNote >= 0 ? "Last MIDI: " + midiNoteName (lastNote)
-                                  : "Last MIDI: none";
-    midiText += triggeredSlot >= 0 ? " -> S" + juce::String (triggeredSlot + 1)
-                                   : " -> no mapped filled slot";
-    midiText += " | active voices: " + juce::String (audioProcessor.getActiveVoiceCount());
-    midiLabel.setText (midiText, juce::dontSendNotification);
 
     for (int i = 0; i < FronasmaskinenAudioProcessor::slotCount; ++i)
     {
@@ -367,6 +371,9 @@ void FronasmaskinenAudioProcessorEditor::refreshFromProcessor()
         slotButtons[(size_t) i].setColour (juce::TextButton::buttonColourId,
                                            selected == i ? juce::Colour::fromRGB (54, 116, 104)
                                                          : juce::Colour::fromRGB (48, 52, 56));
+        moveLeftButtons[(size_t) i].setEnabled (slot.filled && i > 0 && audioProcessor.getSlot (i - 1).filled);
+        moveRightButtons[(size_t) i].setEnabled (slot.filled && i < FronasmaskinenAudioProcessor::slotCount - 1
+                                                 && audioProcessor.getSlot (i + 1).filled);
         clearButtons[(size_t) i].setEnabled (slot.filled);
     }
 }
@@ -401,19 +408,4 @@ void FronasmaskinenAudioProcessorEditor::syncSelectedSlotControls()
     startTrimSlider.setValue (slot.startTrimSeconds, juce::dontSendNotification);
     endTrimSlider.setValue (slot.endTrimSeconds, juce::dontSendNotification);
     gainSlider.setValue (slot.gainDb, juce::dontSendNotification);
-}
-
-juce::String FronasmaskinenAudioProcessorEditor::secondsText (double seconds)
-{
-    return juce::String (seconds, 3) + " s";
-}
-
-juce::String FronasmaskinenAudioProcessorEditor::midiNoteName (int noteNumber)
-{
-    static const char* names[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
-    if (noteNumber < 0)
-        return "none";
-
-    const auto octave = (noteNumber / 12) - 2;
-    return juce::String (names[noteNumber % 12]) + juce::String (octave) + " (" + juce::String (noteNumber) + ")";
 }

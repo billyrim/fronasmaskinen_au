@@ -3,13 +3,16 @@
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
 
-class WaveformComponent final : public juce::Component
+class WaveformComponent final : public juce::Component,
+                                public juce::FileDragAndDropTarget
 {
 public:
     explicit WaveformComponent (FronasmaskinenAudioProcessor& processorToUse);
 
     void paint (juce::Graphics& g) override;
     void mouseDown (const juce::MouseEvent& event) override;
+    bool isInterestedInFileDrag (const juce::StringArray& files) override;
+    void filesDropped (const juce::StringArray& files, int x, int y) override;
 
 private:
     FronasmaskinenAudioProcessor& processor;
@@ -39,11 +42,6 @@ private:
     juce::TextButton releaseButton { "Release" };
     juce::TextButton randomButton { "Random start" };
     juce::Label titleLabel;
-    juce::Label fileLabel;
-    juce::Label selectedLabel;
-    juce::Label durationLabel;
-    juce::Label midiLabel;
-    juce::TextButton auditionButton { "Audition selected" };
     WaveformComponent waveform;
     juce::Slider startSlider;
     juce::Slider endSlider;
@@ -56,19 +54,18 @@ private:
     juce::Label endTrimLabel;
     juce::Label gainLabel;
     std::array<juce::TextButton, FronasmaskinenAudioProcessor::slotCount> slotButtons;
+    std::array<juce::TextButton, FronasmaskinenAudioProcessor::slotCount> moveLeftButtons;
+    std::array<juce::TextButton, FronasmaskinenAudioProcessor::slotCount> moveRightButtons;
     std::array<juce::TextButton, FronasmaskinenAudioProcessor::slotCount> clearButtons;
     std::unique_ptr<juce::FileChooser> fileChooser;
 
     void buttonClicked (juce::Button*) override;
-    void buttonStateChanged (juce::Button*) override;
     void sliderValueChanged (juce::Slider*) override;
     void timerCallback() override;
     void configureSlider (juce::Slider& slider, juce::Label& label, const juce::String& text);
     void refreshFromProcessor();
     void updateRangeFromSample();
     void syncSelectedSlotControls();
-    static juce::String secondsText (double seconds);
-    static juce::String midiNoteName (int noteNumber);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FronasmaskinenAudioProcessorEditor)
 };
