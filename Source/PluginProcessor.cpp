@@ -111,7 +111,7 @@ void FronasmaskinenAudioProcessor::handleMidi (const juce::MidiBuffer& midiMessa
         const auto message = metadata.getMessage();
 
         if (message.isNoteOn())
-            noteOn (message.getNoteNumber(), message.getVelocity());
+            noteOn (message.getNoteNumber(), message.getFloatVelocity());
         else if (message.isNoteOff())
             noteOff (message.getNoteNumber());
         else if (message.isController() && message.getControllerNumber() == sequenceOutputVolumeCc)
@@ -494,8 +494,10 @@ bool FronasmaskinenAudioProcessor::loadAudioFile (const juce::File& file)
     reader->read (&nextBuffer, 0, (int) reader->lengthInSamples, 0, true, true);
 
     const juce::ScopedLock lock (dataLock);
-    releaseAllVoices();
     preview = {};
+    slots.fill ({});
+    voices.fill ({});
+    nextVoiceIndex = 0;
     sampleBuffer = std::move (nextBuffer);
     sampleBufferRate = reader->sampleRate;
     rebuildWaveformThumbnail();
@@ -503,6 +505,7 @@ bool FronasmaskinenAudioProcessor::loadAudioFile (const juce::File& file)
     selectionStartSeconds = 0.0;
     selectionEndSeconds = std::min (defaultLoopSeconds, getSampleDurationSeconds());
     selectedSlot = -1;
+    lastTriggeredSlot.store (-1);
     return true;
 }
 
@@ -780,7 +783,12 @@ void FronasmaskinenAudioProcessor::clearSlot (int slotIndex)
     const juce::ScopedLock lock (dataLock);
     slots[(size_t) slotIndex] = {};
     if (selectedSlot == slotIndex)
+    {
         selectedSlot = -1;
+        preview.loopActive = false;
+        preview.pendingLoopStartActive = false;
+        preview.slotTransitionActive = false;
+    }
     releaseVoicesForSlot (slotIndex);
 }
 
@@ -1175,6 +1183,11 @@ void FronasmaskinenAudioProcessor::setStateInformation (const void* data, int si
         slot.fadeSeconds = child->getDoubleAttribute ("fade", defaultFadeSeconds);
         slot.gainDb = (float) child->getDoubleAttribute ("gainDb", 0.0);
     }
+
+    if (selectedSlot >= 0 && selectedSlot < slotCount && slots[(size_t) selectedSlot].filled)
+        activateLoopFromSelectedSlot();
+    else
+        selectedSlot = -1;
 }
 
 juce::AudioProcessorEditor* FronasmaskinenAudioProcessor::createEditor()

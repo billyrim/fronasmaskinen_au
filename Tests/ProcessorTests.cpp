@@ -151,13 +151,48 @@ juce::File createSlotSwitchSample()
     return file;
 }
 
+juce::File createStereoChannelSample()
+{
+    const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        .getNonexistentChildFile ("fronasmaskinen-stereo-channel-sample", ".wav");
+
+    constexpr double sampleRate = 44100.0;
+    constexpr int numSamples = 44100;
+    juce::AudioBuffer<float> buffer (2, numSamples);
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        buffer.setSample (0, i, 0.6f);
+        buffer.setSample (1, i, -0.3f);
+    }
+
+    juce::WavAudioFormat format;
+    std::unique_ptr<juce::FileOutputStream> stream (file.createOutputStream());
+    expect (stream != nullptr, "Could not create stereo WAV fixture stream");
+
+    std::unique_ptr<juce::AudioFormatWriter> writer (format.createWriterFor (stream.get(), sampleRate, 2, 24, {}, 0));
+    expect (writer != nullptr, "Could not create stereo WAV fixture writer");
+    stream.release();
+
+    expect (writer->writeFromAudioSampleBuffer (buffer, 0, buffer.getNumSamples()), "Could not write stereo WAV fixture");
+    return file;
+}
+
 void processMidiNote (FronasmaskinenAudioProcessor& processor, int noteNumber, bool noteOn)
 {
     juce::AudioBuffer<float> buffer (2, 256);
     juce::MidiBuffer midi;
-    midi.addEvent (noteOn ? juce::MidiMessage::noteOn (1, noteNumber, (juce::uint8) 100)
+    midi.addEvent (noteOn ? juce::MidiMessage::noteOn (1, noteNumber, 100.0f / 127.0f)
                           : juce::MidiMessage::noteOff (1, noteNumber),
                    0);
+    processor.processBlock (buffer, midi);
+}
+
+void processMidiNoteWithVelocity (FronasmaskinenAudioProcessor& processor, int noteNumber, juce::uint8 velocity)
+{
+    juce::AudioBuffer<float> buffer (2, 256);
+    juce::MidiBuffer midi;
+    midi.addEvent (juce::MidiMessage::noteOn (1, noteNumber, (float) velocity / 127.0f), 0);
     processor.processBlock (buffer, midi);
 }
 
@@ -165,7 +200,16 @@ float renderMidiNoteRms (FronasmaskinenAudioProcessor& processor, int noteNumber
 {
     juce::AudioBuffer<float> buffer (2, 2048);
     juce::MidiBuffer midi;
-    midi.addEvent (juce::MidiMessage::noteOn (1, noteNumber, (juce::uint8) 100), 0);
+    midi.addEvent (juce::MidiMessage::noteOn (1, noteNumber, 100.0f / 127.0f), 0);
+    processor.processBlock (buffer, midi);
+    return buffer.getRMSLevel (0, 0, buffer.getNumSamples());
+}
+
+float renderMidiNoteRmsWithVelocity (FronasmaskinenAudioProcessor& processor, int noteNumber, juce::uint8 velocity)
+{
+    juce::AudioBuffer<float> buffer (2, 2048);
+    juce::MidiBuffer midi;
+    midi.addEvent (juce::MidiMessage::noteOn (1, noteNumber, (float) velocity / 127.0f), 0);
     processor.processBlock (buffer, midi);
     return buffer.getRMSLevel (0, 0, buffer.getNumSamples());
 }
@@ -227,9 +271,17 @@ RenderEdge renderMidiEdge (FronasmaskinenAudioProcessor& processor, int noteNumb
 {
     juce::AudioBuffer<float> buffer (2, numSamples);
     juce::MidiBuffer midi;
-    midi.addEvent (juce::MidiMessage::noteOn (1, noteNumber, (juce::uint8) 100), 0);
+    midi.addEvent (juce::MidiMessage::noteOn (1, noteNumber, 100.0f / 127.0f), 0);
     processor.processBlock (buffer, midi);
     return { buffer.getSample (0, 0), buffer.getSample (0, buffer.getNumSamples() - 1) };
+}
+
+RenderEdge renderStereoPreviewFirstSamples (FronasmaskinenAudioProcessor& processor, int numSamples)
+{
+    juce::AudioBuffer<float> buffer (2, numSamples);
+    juce::MidiBuffer midi;
+    processor.processBlock (buffer, midi);
+    return { buffer.getSample (0, 1), buffer.getSample (1, 1) };
 }
 
 float renderPreviewMaxAdjacentDelta (FronasmaskinenAudioProcessor& processor, int numSamples)
@@ -267,6 +319,55 @@ void testSampleLoadingAndWaveform()
     expect (peaks.size() == 2048, "Waveform thumbnail should be built after loading");
     expect (std::any_of (peaks.begin(), peaks.end(), [] (float value) { return value > 0.1f; }),
             "Waveform thumbnail should contain non-silent peaks");
+
+    sample.deleteFile();
+}
+
+void testLoadingNewSampleResetsMicroloopState()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto firstSample = createTestSample();
+    const auto secondSample = createSlotSwitchSample();
+    expect (processor.loadAudioFile (firstSample), "First sample should load");
+    processor.prepareToPlay (44100.0, 256);
+
+    processor.setSelection (0.10, 0.18);
+    expect (processor.saveSelectionToSlot (0), "Should save a loop from the first sample");
+    processor.playPreview();
+    processMidiNote (processor, FronasmaskinenAudioProcessor::baseNote, true);
+    expect (processor.getActiveVoiceCount() > 0, "First sample loop should start a voice");
+
+    expect (processor.loadAudioFile (secondSample), "Loading a replacement sample should succeed");
+    expect (processor.getSelectedSlotIndex() == -1, "Loading a new sample should clear selected slot");
+    expect (! processor.hasPreviewLoop(), "Loading a new sample should clear the active preview loop");
+    expect (! processor.hasPendingLoopStart(), "Loading a new sample should clear pending loop state");
+    expect (processor.getActiveVoiceCount() == 0, "Loading a new sample should release old sample voices");
+
+    for (int i = 0; i < FronasmaskinenAudioProcessor::slotCount; ++i)
+        expect (! processor.getSlot (i).filled, "Loading a new sample should clear old microloop slots");
+
+    firstSample.deleteFile();
+    secondSample.deleteFile();
+}
+
+void testSelectionAndPreviewSeekClampToSampleBounds()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createTestSample();
+    expect (processor.loadAudioFile (sample), "Sample should load");
+
+    processor.setSelection (-1.0, 0.001);
+    expectNear (processor.getSelectionStartSeconds(), 0.0, epsilon, "Selection start should clamp to sample start");
+    expectNear (processor.getSelectionEndSeconds(), 0.02, epsilon, "Selection end should preserve minimum loop length");
+
+    processor.setSelection (0.99, 2.0);
+    expectNear (processor.getSelectionStartSeconds(), 0.98, epsilon, "Selection start should leave room for minimum loop length");
+    expectNear (processor.getSelectionEndSeconds(), 1.0, epsilon, "Selection end should clamp to sample end");
+
+    processor.seekPreview (-0.5);
+    expectNear (processor.getPreviewPositionSeconds(), 0.0, epsilon, "Preview seek should clamp before sample start");
+    processor.seekPreview (2.0);
+    expectNear (processor.getPreviewPositionSeconds(), 1.0, epsilon, "Preview seek should clamp after sample end");
 
     sample.deleteFile();
 }
@@ -397,6 +498,55 @@ void testSlotTrimAndGainPersistence()
     sample.deleteFile();
 }
 
+void testProcessorStateRoundTripRestoresSampleSlotsAndSelectedLoop()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createTestSample();
+    expect (processor.loadAudioFile (sample), "Sample should load");
+
+    processor.setSelection (0.10, 0.20);
+    expect (processor.saveSelectionToSlot (0), "Should save S1");
+    processor.setSelectedSlotTrim (0.011, -0.013);
+    processor.setSelectedSlotFadeSeconds (0.037);
+    processor.setSelectedSlotGainDb (-8.0f);
+
+    processor.setSelection (0.40, 0.55);
+    expect (processor.saveSelectionToSlot (1), "Should save S2");
+    processor.setSelectedSlotGainDb (4.0f);
+
+    expect (processor.selectSlot (0), "S1 should be selected before saving state");
+
+    juce::MemoryBlock state;
+    processor.getStateInformation (state);
+
+    auto restored = FronasmaskinenAudioProcessor();
+    restored.setStateInformation (state.getData(), (int) state.getSize());
+
+    expect (restored.hasSample(), "Restored state should reload the sample");
+    expect (restored.getLoadedFilePath() == sample.getFullPathName(), "Restored state should keep sample path");
+    expect (restored.getSelectedSlotIndex() == 0, "Restored state should keep selected slot");
+    expect (restored.hasPreviewLoop(), "Restored selected slot should reactivate preview loop");
+    expectNear (restored.getPreviewLoopStartSeconds(), 0.111, epsilon, "Restored preview loop should include start trim");
+    expectNear (restored.getPreviewLoopEndSeconds(), 0.187, epsilon, "Restored preview loop should include end trim");
+
+    const auto slot1 = restored.getSlot (0);
+    expect (slot1.filled, "Restored S1 should be filled");
+    expectNear (slot1.baseStartSeconds, 0.10, epsilon, "Restored S1 should keep base start");
+    expectNear (slot1.baseEndSeconds, 0.20, epsilon, "Restored S1 should keep base end");
+    expectNear (slot1.startTrimSeconds, 0.011, epsilon, "Restored S1 should keep start trim");
+    expectNear (slot1.endTrimSeconds, -0.013, epsilon, "Restored S1 should keep end trim");
+    expectNear (slot1.fadeSeconds, 0.037, epsilon, "Restored S1 should keep fade");
+    expectNear (slot1.gainDb, -8.0, epsilon, "Restored S1 should keep gain");
+
+    const auto slot2 = restored.getSlot (1);
+    expect (slot2.filled, "Restored S2 should be filled");
+    expectNear (slot2.baseStartSeconds, 0.40, epsilon, "Restored S2 should keep base start");
+    expectNear (slot2.baseEndSeconds, 0.55, epsilon, "Restored S2 should keep base end");
+    expectNear (slot2.gainDb, 4.0, epsilon, "Restored S2 should keep gain");
+
+    sample.deleteFile();
+}
+
 void testPreviewLoopSeamUsesPostRollCrossfade()
 {
     auto processor = FronasmaskinenAudioProcessor();
@@ -500,6 +650,47 @@ void testReleaseAndRandomStart()
     sample.deleteFile();
 }
 
+void testLoopPointCreationRequiresPreviewAndFreeSlot()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    expect (! processor.setLoopPointAtPreviewPosition(), "Loop point creation should fail without a sample");
+
+    const auto sample = createTestSample();
+    expect (processor.loadAudioFile (sample), "Sample should load");
+    processor.seekPreview (0.10);
+    expect (! processor.setLoopPointAtPreviewPosition(), "Loop point creation should fail while preview is stopped");
+
+    processor.playPreview();
+    seekAndSetLoopPoint (processor, 0.10);
+    processor.seekPreview (0.105);
+    expect (! processor.setLoopPointAtPreviewPosition(), "Second loop point should reject loops shorter than minimum length");
+    expect (processor.hasPendingLoopStart(), "Rejected short loop should keep pending start armed");
+
+    processor.releasePreviewLoop();
+    for (int i = 0; i < FronasmaskinenAudioProcessor::slotCount; ++i)
+    {
+        const auto start = 0.04 + (double) i * 0.04;
+        processor.setSelection (start, start + 0.03);
+        expect (processor.saveSelectionToSlot (i), "Should fill slot " + juce::String (i + 1));
+    }
+
+    std::array<double, FronasmaskinenAudioProcessor::slotCount> startsBeforeFullBankAttempt {};
+    for (int i = 0; i < FronasmaskinenAudioProcessor::slotCount; ++i)
+        startsBeforeFullBankAttempt[(size_t) i] = processor.getSlot (i).baseStartSeconds;
+
+    processor.playPreview();
+    seekAndSetLoopPoint (processor, 0.60);
+    processor.seekPreview (0.68);
+    expect (! processor.setLoopPointAtPreviewPosition(), "Loop creation should fail when all slots are filled");
+    expect (! processor.hasPendingLoopStart(), "Failed full-bank loop creation should clear pending start");
+    for (int i = 0; i < FronasmaskinenAudioProcessor::slotCount; ++i)
+        expectNear (processor.getSlot (i).baseStartSeconds, startsBeforeFullBankAttempt[(size_t) i], epsilon,
+                    "Failed full-bank loop creation should not overwrite existing slots");
+    expect (! processor.randomizePreviewLoopStart(), "Random start should fail when all slots are filled");
+
+    sample.deleteFile();
+}
+
 void testSelectingSlotDuringPreviewMovesPlayheadIntoSlot()
 {
     auto processor = FronasmaskinenAudioProcessor();
@@ -572,6 +763,37 @@ void testSlotMouseAndMidiTriggers()
     sample.deleteFile();
 }
 
+void testClearingSelectedSlotStopsItsLoopAndVoice()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createTestSample();
+    expect (processor.loadAudioFile (sample), "Sample should load");
+    processor.prepareToPlay (44100.0, 256);
+
+    processor.setSelection (0.10, 0.20);
+    expect (processor.saveSelectionToSlot (0), "Should save S1");
+    processor.playPreview();
+    processMidiNote (processor, FronasmaskinenAudioProcessor::baseNote, true);
+    expect (processor.getSelectedSlotIndex() == 0, "S1 should be selected before clear");
+    expect (processor.hasPreviewLoop(), "S1 loop should be active before clear");
+    expect (processor.getActiveVoiceCount() > 0, "S1 voice should be active before clear");
+
+    processor.clearSlot (0);
+    expect (! processor.getSlot (0).filled, "Cleared slot should become empty");
+    expect (processor.getSelectedSlotIndex() == -1, "Clearing the selected slot should clear selection");
+    expect (! processor.hasPreviewLoop(), "Clearing the selected slot should deactivate its preview loop");
+
+    juce::AudioBuffer<float> buffer (2, 2048);
+    juce::MidiBuffer midi;
+    processor.processBlock (buffer, midi);
+    expect (processor.getActiveVoiceCount() == 0, "Clearing a slot should release its active voice");
+
+    processMidiNote (processor, FronasmaskinenAudioProcessor::baseNote, true);
+    expect (processor.getLastTriggeredSlot() == -1, "Cleared slot should not be retriggered by MIDI");
+
+    sample.deleteFile();
+}
+
 void testMidiTriggerUpdatesPausedPreviewLoop()
 {
     auto processor = FronasmaskinenAudioProcessor();
@@ -617,6 +839,41 @@ void testSlotGainAffectsMidiVoiceLevel()
     processor.setSelectedSlotGainDb (6.0f);
     const auto loudRms = renderMidiNoteRms (processor, FronasmaskinenAudioProcessor::baseNote);
     expect (loudRms > unityRms * 1.70f, "Positive slot gain should increase MIDI voice level");
+
+    sample.deleteFile();
+}
+
+void testMidiVelocityScalesVoiceLevel()
+{
+    const auto sample = createSlotSwitchSample();
+
+    auto renderWithVelocity = [&sample] (juce::uint8 velocity)
+    {
+        auto processor = FronasmaskinenAudioProcessor();
+        expect (processor.loadAudioFile (sample), "Sample should load for velocity test");
+        processor.prepareToPlay (44100.0, 2048);
+        processor.setSelection (0.10, 0.20);
+        expect (processor.saveSelectionToSlot (0), "Should save S1 for velocity test");
+        return renderMidiNoteRmsWithVelocity (processor, FronasmaskinenAudioProcessor::baseNote, velocity);
+    };
+
+    const auto quietRms = renderWithVelocity (1);
+    const auto loudRms = renderWithVelocity (127);
+    expect (quietRms > 0.001f, "Low velocity MIDI voice should still be audible");
+    expect (loudRms > quietRms * 2.30f,
+            "Higher MIDI velocity should render a louder voice, quiet "
+                + juce::String (quietRms, 6)
+                + " loud "
+                + juce::String (loudRms, 6));
+
+    auto processor = FronasmaskinenAudioProcessor();
+    expect (processor.loadAudioFile (sample), "Sample should load for velocity-zero test");
+    processor.prepareToPlay (44100.0, 2048);
+    processor.setSelection (0.10, 0.20);
+    expect (processor.saveSelectionToSlot (0), "Should save S1 for velocity-zero test");
+    processMidiNoteWithVelocity (processor, FronasmaskinenAudioProcessor::baseNote, 0);
+    expect (processor.getLastMidiNote() == FronasmaskinenAudioProcessor::baseNote,
+            "Velocity-zero note-on should be treated as note-off by JUCE");
 
     sample.deleteFile();
 }
@@ -677,6 +934,26 @@ void testSlotGainAffectsPreviewLoopLevel()
     processor.playPreview();
     const auto loudRms = renderPreviewRms (processor);
     expect (loudRms > unityRms * 1.70f, "Positive slot gain should increase preview loop level");
+
+    sample.deleteFile();
+}
+
+void testStereoSamplePreviewPreservesChannelIndependence()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createStereoChannelSample();
+    expect (processor.loadAudioFile (sample), "Stereo sample should load");
+    processor.prepareToPlay (44100.0, 256);
+
+    processor.setSelection (0.05, 0.25);
+    expect (processor.saveSelectionToSlot (0), "Should save stereo S1");
+    processor.playPreview();
+
+    const auto firstSamples = renderStereoPreviewFirstSamples (processor, 16);
+    expect (firstSamples.first > 0.0f, "Left preview channel should render left source polarity");
+    expect (firstSamples.last < 0.0f, "Right preview channel should render right source polarity");
+    expect (std::abs (firstSamples.first - firstSamples.last) > 0.0001f,
+            "Stereo preview should not collapse both channels to the same source channel");
 
     sample.deleteFile();
 }
@@ -773,21 +1050,29 @@ int main()
     try
     {
         runTest ("sample loading and waveform thumbnail", testSampleLoadingAndWaveform);
+        runTest ("loading new sample resets microloop state", testLoadingNewSampleResetsMicroloopState);
+        runTest ("selection and preview seek clamp to sample bounds", testSelectionAndPreviewSeekClampToSampleBounds);
         runTest ("preview seek, play, and loop slot creation", testPreviewSeekPlayAndLoopSlotCreation);
         runTest ("preview playback without loop does not clip", testPreviewPlaybackWithoutLoopDoesNotClip);
         runTest ("loop point creation snaps to nearby smooth seam", testLoopPointCreationSnapsToNearbySmoothSeam);
         runTest ("slot trim and gain persistence", testSlotTrimAndGainPersistence);
+        runTest ("processor state round trip restores sample slots and selected loop",
+                 testProcessorStateRoundTripRestoresSampleSlotsAndSelectedLoop);
         runTest ("preview loop seam uses post-roll crossfade", testPreviewLoopSeamUsesPostRollCrossfade);
         runTest ("preview slot switch crossfades while playing", testPreviewSlotSwitchCrossfadesWhilePlaying);
         runTest ("MIDI slot switch crossfades preview while playing", testMidiSlotSwitchCrossfadesPreviewWhilePlaying);
         runTest ("release and random start", testReleaseAndRandomStart);
+        runTest ("loop point creation requires preview and free slot", testLoopPointCreationRequiresPreviewAndFreeSlot);
         runTest ("slot selection moves playhead during preview", testSelectingSlotDuringPreviewMovesPlayheadIntoSlot);
         runTest ("slot mouse and MIDI triggers", testSlotMouseAndMidiTriggers);
+        runTest ("clearing selected slot stops its loop and voice", testClearingSelectedSlotStopsItsLoopAndVoice);
         runTest ("MIDI trigger updates paused preview loop", testMidiTriggerUpdatesPausedPreviewLoop);
         runTest ("slot gain affects MIDI voice level", testSlotGainAffectsMidiVoiceLevel);
+        runTest ("MIDI velocity scales voice level", testMidiVelocityScalesVoiceLevel);
         runTest ("sequence output volume CC modulates held MIDI output until next CC",
                  testSequenceOutputVolumeCcModulatesHeldMidiOutputUntilNextCc);
         runTest ("slot gain affects preview loop level", testSlotGainAffectsPreviewLoopLevel);
+        runTest ("stereo sample preview preserves channel independence", testStereoSamplePreviewPreservesChannelIndependence);
         runTest ("waveform file drag and drop loads sample", testWaveformFileDragAndDropLoadsSample);
         runTest ("slot move swaps filled slots", testSlotMoveSwapsFilledSlots);
         runTest ("slot move rejects edges and empty targets", testSlotMoveRejectsEdgesAndEmptyTargets);
