@@ -10,6 +10,7 @@ constexpr double minFadeSeconds = 0.002;
 constexpr double maxFadeSeconds = 0.080;
 constexpr double maxLoopEndpointAdjustSeconds = 0.400;
 constexpr double loopEndpointSearchStepSeconds = 0.001;
+constexpr int sequenceOutputSmoothingSamples = 256;
 
 double clampDouble (double value, double low, double high)
 {
@@ -19,6 +20,22 @@ double clampDouble (double value, double low, double high)
 float dbToGain (float db)
 {
     return juce::Decibels::decibelsToGain (db, -80.0f);
+}
+
+float sequenceOutputVolumeGainFromCcValue (int value)
+{
+    const auto clampedValue = juce::jlimit (0, 100, value);
+    const auto attenuationDb = (float) (100 - clampedValue) * -0.3f;
+    return dbToGain (attenuationDb);
+}
+
+float rampedSequenceOutputGain (float startGain, float endGain, int rampSamples, int sample)
+{
+    if (rampSamples <= 1 || sample >= rampSamples)
+        return endGain;
+
+    const auto t = (float) (sample + 1) / (float) rampSamples;
+    return startGain + ((endGain - startGain) * t);
 }
 }
 
@@ -52,17 +69,39 @@ void FronasmaskinenAudioProcessor::processBlock (juce::AudioBuffer<float>& buffe
     juce::ScopedNoDenormals noDenormals;
     buffer.clear();
 
+    if (hostTransportIsStopped())
+    {
+        sequenceOutputCurrentGain = 1.0f;
+        sequenceOutputTargetGain = 1.0f;
+    }
+
     handleMidi (midiMessages);
+    const auto sequenceOutputStartGain = sequenceOutputCurrentGain;
+    const auto sequenceOutputEndGain = sequenceOutputTargetGain;
+    const auto sequenceOutputRampSamples = juce::jmin (buffer.getNumSamples(), sequenceOutputSmoothingSamples);
 
     const juce::ScopedTryLock lock (dataLock);
     if (! lock.isLocked())
         return;
 
-    renderPreview (buffer, 0, buffer.getNumSamples());
+    renderPreview (buffer,
+                   0,
+                   buffer.getNumSamples(),
+                   sequenceOutputStartGain,
+                   sequenceOutputEndGain,
+                   sequenceOutputRampSamples);
 
     for (auto& voice : voices)
         if (voice.active)
-            renderVoice (voice, buffer, 0, buffer.getNumSamples());
+            renderVoice (voice,
+                         buffer,
+                         0,
+                         buffer.getNumSamples(),
+                         sequenceOutputStartGain,
+                         sequenceOutputEndGain,
+                         sequenceOutputRampSamples);
+
+    sequenceOutputCurrentGain = sequenceOutputEndGain;
 }
 
 void FronasmaskinenAudioProcessor::handleMidi (const juce::MidiBuffer& midiMessages)
@@ -75,6 +114,8 @@ void FronasmaskinenAudioProcessor::handleMidi (const juce::MidiBuffer& midiMessa
             noteOn (message.getNoteNumber(), message.getVelocity());
         else if (message.isNoteOff())
             noteOff (message.getNoteNumber());
+        else if (message.isController() && message.getControllerNumber() == sequenceOutputVolumeCc)
+            sequenceOutputTargetGain = sequenceOutputVolumeGainFromCcValue (message.getControllerValue());
     }
 }
 
@@ -153,7 +194,13 @@ void FronasmaskinenAudioProcessor::releaseAllVoices()
     }
 }
 
-void FronasmaskinenAudioProcessor::renderVoice (Voice& voice, juce::AudioBuffer<float>& output, int startSample, int numSamples)
+void FronasmaskinenAudioProcessor::renderVoice (Voice& voice,
+                                                juce::AudioBuffer<float>& output,
+                                                int startSample,
+                                                int numSamples,
+                                                float outputGainStart,
+                                                float outputGainEnd,
+                                                int outputGainRampSamples)
 {
     if (voice.slotIndex < 0 || voice.slotIndex >= slotCount)
         return;
@@ -248,14 +295,20 @@ void FronasmaskinenAudioProcessor::renderVoice (Voice& voice, juce::AudioBuffer<
                 value = (float) ((value * (1.0 - preRollXfade)) + (head * preRollXfade));
             }
 
-            output.addSample (channel, startSample + sample, value * gain * voice.envelope);
+            const auto outputGain = rampedSequenceOutputGain (outputGainStart, outputGainEnd, outputGainRampSamples, sample);
+            output.addSample (channel, startSample + sample, value * gain * voice.envelope * outputGain);
         }
 
         voice.positionSamples += sampleBufferRate / hostSampleRate;
     }
 }
 
-void FronasmaskinenAudioProcessor::renderPreview (juce::AudioBuffer<float>& output, int startSample, int numSamples)
+void FronasmaskinenAudioProcessor::renderPreview (juce::AudioBuffer<float>& output,
+                                                  int startSample,
+                                                  int numSamples,
+                                                  float outputGainStart,
+                                                  float outputGainEnd,
+                                                  int outputGainRampSamples)
 {
     if (! preview.playing || sampleBuffer.getNumSamples() == 0)
         return;
@@ -365,11 +418,13 @@ void FronasmaskinenAudioProcessor::renderPreview (juce::AudioBuffer<float>& outp
                 const auto oldValue = readSample (sourceChannel, preview.transitionPositionSamples)
                                     * (float) preview.transitionGain;
                 value = (float) ((oldValue * (1.0 - transitionMix)) + ((value * gain) * transitionMix));
-                output.addSample (channel, startSample + sample, value * preview.envelope);
+                const auto outputGain = rampedSequenceOutputGain (outputGainStart, outputGainEnd, outputGainRampSamples, sample);
+                output.addSample (channel, startSample + sample, value * preview.envelope * outputGain);
             }
             else
             {
-                output.addSample (channel, startSample + sample, value * preview.envelope * gain);
+                const auto outputGain = rampedSequenceOutputGain (outputGainStart, outputGainEnd, outputGainRampSamples, sample);
+                output.addSample (channel, startSample + sample, value * preview.envelope * gain * outputGain);
             }
         }
 
@@ -829,6 +884,19 @@ int FronasmaskinenAudioProcessor::getActiveVoiceCount() const
 {
     const juce::ScopedLock lock (dataLock);
     return (int) std::count_if (voices.begin(), voices.end(), [] (const Voice& voice) { return voice.active; });
+}
+
+bool FronasmaskinenAudioProcessor::hostTransportIsStopped() const
+{
+    const auto* playHead = getPlayHead();
+    if (playHead == nullptr)
+        return false;
+
+    const auto position = playHead->getPosition();
+    if (! position.hasValue())
+        return false;
+
+    return ! position->getIsPlaying();
 }
 
 std::pair<double, double> FronasmaskinenAudioProcessor::effectiveSelectedSlotBoundsSeconds() const

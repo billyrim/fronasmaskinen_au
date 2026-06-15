@@ -14,6 +14,7 @@ class FronasmaskinenAudioProcessor final : public juce::AudioProcessor
 public:
     static constexpr int slotCount = 10;
     static constexpr int baseNote = 36; // Logic labels MIDI note 36 as C1.
+    static constexpr int sequenceOutputVolumeCc = 20;
 
     struct Slot
     {
@@ -152,6 +153,8 @@ private:
     int nextVoiceIndex = 0;
     std::atomic<int> lastMidiNote { -1 };
     std::atomic<int> lastTriggeredSlot { -1 };
+    float sequenceOutputCurrentGain = 1.0f;
+    float sequenceOutputTargetGain = 1.0f;
 
     void handleMidi (const juce::MidiBuffer& midiMessages);
     void noteOn (int noteNumber, float velocity);
@@ -159,13 +162,25 @@ private:
     void startVoice (int slotIndex, int noteNumber, float velocity);
     void releaseVoicesForSlot (int slotIndex);
     void releaseAllVoices();
-    void renderVoice (Voice& voice, juce::AudioBuffer<float>& output, int startSample, int numSamples);
-    void renderPreview (juce::AudioBuffer<float>& output, int startSample, int numSamples);
+    void renderVoice (Voice& voice,
+                      juce::AudioBuffer<float>& output,
+                      int startSample,
+                      int numSamples,
+                      float outputGainStart,
+                      float outputGainEnd,
+                      int outputGainRampSamples);
+    void renderPreview (juce::AudioBuffer<float>& output,
+                        int startSample,
+                        int numSamples,
+                        float outputGainStart,
+                        float outputGainEnd,
+                        int outputGainRampSamples);
     float readSample (int channel, double absoluteSample) const;
     int slotFadeSamplesForHost (const Slot& slot) const;
     int slotFadeSamplesForSource (const Slot& slot, double loopLengthSamples) const;
     std::pair<double, double> effectiveSlotBoundsSamples (const Slot& slot) const;
     std::pair<double, double> effectiveSelectedSlotBoundsSeconds() const;
+    bool hostTransportIsStopped() const;
     void beginPreviewSlotTransition (int nextSlotIndex);
     bool swapFilledSlots (int slotIndex, int targetSlotIndex);
     std::pair<double, double> findSmoothLoopBoundsSeconds (double startSeconds, double endSeconds) const;

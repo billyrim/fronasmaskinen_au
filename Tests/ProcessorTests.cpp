@@ -170,6 +170,23 @@ float renderMidiNoteRms (FronasmaskinenAudioProcessor& processor, int noteNumber
     return buffer.getRMSLevel (0, 0, buffer.getNumSamples());
 }
 
+float renderMidiCcBlockRms (FronasmaskinenAudioProcessor& processor, int controllerNumber, int controllerValue)
+{
+    juce::AudioBuffer<float> buffer (2, 4096);
+    juce::MidiBuffer midi;
+    midi.addEvent (juce::MidiMessage::controllerEvent (1, controllerNumber, controllerValue), 0);
+    processor.processBlock (buffer, midi);
+    return buffer.getRMSLevel (0, 0, buffer.getNumSamples());
+}
+
+float renderMidiHeldBlockRms (FronasmaskinenAudioProcessor& processor)
+{
+    juce::AudioBuffer<float> buffer (2, 4096);
+    juce::MidiBuffer midi;
+    processor.processBlock (buffer, midi);
+    return buffer.getRMSLevel (0, 0, buffer.getNumSamples());
+}
+
 float renderPreviewRms (FronasmaskinenAudioProcessor& processor)
 {
     juce::AudioBuffer<float> buffer (2, 2048);
@@ -604,6 +621,36 @@ void testSlotGainAffectsMidiVoiceLevel()
     sample.deleteFile();
 }
 
+void testSequenceOutputVolumeCcModulatesHeldMidiOutputUntilNextCc()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createSlotSwitchSample();
+    expect (processor.loadAudioFile (sample), "Sample should load");
+    processor.prepareToPlay (44100.0, 4096);
+
+    processor.setSelection (0.10, 0.20);
+    expect (processor.saveSelectionToSlot (0), "Should save S1");
+    processor.setSelectedSlotGainDb (0.0f);
+
+    processMidiNote (processor, FronasmaskinenAudioProcessor::baseNote, true);
+    renderMidiHeldBlockRms (processor);
+
+    const auto unityRms = renderMidiCcBlockRms (processor, FronasmaskinenAudioProcessor::sequenceOutputVolumeCc, 100);
+    expect (unityRms > 0.001f, "Held MIDI voice should render audible output at neutral sequence volume");
+
+    const auto quietRms = renderMidiCcBlockRms (processor, FronasmaskinenAudioProcessor::sequenceOutputVolumeCc, 60);
+    expect (quietRms < unityRms * 0.30f, "Sequence output volume CC 60 should attenuate the current step by about 12 dB");
+    expectNear (processor.getSlot (0).gainDb, 0.0, epsilon, "Sequence output volume CC should not alter the slot gain setting");
+
+    const auto heldQuietRms = renderMidiHeldBlockRms (processor);
+    expect (heldQuietRms < unityRms * 0.30f, "Sequence output volume should stay attenuated until the sequencer sends the next CC");
+
+    const auto resetRms = renderMidiCcBlockRms (processor, FronasmaskinenAudioProcessor::sequenceOutputVolumeCc, 100);
+    expect (resetRms > unityRms * 0.90f, "Sequence output volume CC 100 should return the held voice to neutral level");
+
+    sample.deleteFile();
+}
+
 void testSlotGainAffectsPreviewLoopLevel()
 {
     auto processor = FronasmaskinenAudioProcessor();
@@ -738,6 +785,8 @@ int main()
         runTest ("slot mouse and MIDI triggers", testSlotMouseAndMidiTriggers);
         runTest ("MIDI trigger updates paused preview loop", testMidiTriggerUpdatesPausedPreviewLoop);
         runTest ("slot gain affects MIDI voice level", testSlotGainAffectsMidiVoiceLevel);
+        runTest ("sequence output volume CC modulates held MIDI output until next CC",
+                 testSequenceOutputVolumeCcModulatesHeldMidiOutputUntilNextCc);
         runTest ("slot gain affects preview loop level", testSlotGainAffectsPreviewLoopLevel);
         runTest ("waveform file drag and drop loads sample", testWaveformFileDragAndDropLoadsSample);
         runTest ("slot move swaps filled slots", testSlotMoveSwapsFilledSlots);
