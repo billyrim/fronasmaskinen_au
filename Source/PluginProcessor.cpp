@@ -6,6 +6,10 @@ namespace
 constexpr double minLoopSeconds = 0.02;
 constexpr double defaultLoopSeconds = 0.25;
 constexpr double defaultFadeSeconds = 0.012;
+constexpr double minFadeSeconds = 0.002;
+constexpr double maxFadeSeconds = 0.080;
+constexpr double maxLoopEndpointAdjustSeconds = 0.400;
+constexpr double loopEndpointSearchStepSeconds = 0.001;
 
 double clampDouble (double value, double low, double high)
 {
@@ -87,6 +91,7 @@ void FronasmaskinenAudioProcessor::noteOn (int noteNumber, float velocity)
     if (! slots[(size_t) slotIndex].filled || sampleBuffer.getNumSamples() == 0)
         return;
 
+    beginPreviewSlotTransition (slotIndex);
     selectedSlot = slotIndex;
     activateLoopFromSelectedSlot();
     preview.positionSamples = preview.loopStartSeconds * sampleBufferRate;
@@ -172,17 +177,20 @@ void FronasmaskinenAudioProcessor::renderVoice (Voice& voice, juce::AudioBuffer<
 
     const auto channels = output.getNumChannels();
     const auto sourceChannels = sampleBuffer.getNumChannels();
-    const auto seamFade = juce::jlimit (1, (int) std::floor (loopLength * 0.45), crossfadeSamples);
+    const auto seamFade = slotFadeSamplesForSource (slot, loopLength);
+    const auto envelopeFadeSamples = slotFadeSamplesForHost (slot);
     const auto gain = dbToGain (slot.gainDb) * voice.velocityGain;
+    const auto sampleCount = (double) sampleBuffer.getNumSamples();
+    const auto canUsePostRoll = end + (double) seamFade < sampleCount - 1.0;
 
     for (int sample = 0; sample < numSamples; ++sample)
     {
         if (! voice.active)
             break;
 
-        if (voice.attackSample < fadeSamples && ! voice.releasing)
+        if (voice.attackSample < envelopeFadeSamples && ! voice.releasing)
         {
-            voice.envelope = (float) voice.attackSample / (float) fadeSamples;
+            voice.envelope = (float) voice.attackSample / (float) envelopeFadeSamples;
             ++voice.attackSample;
         }
         else if (! voice.releasing)
@@ -192,11 +200,11 @@ void FronasmaskinenAudioProcessor::renderVoice (Voice& voice, juce::AudioBuffer<
 
         if (voice.releasing)
         {
-            const auto t = (float) voice.releaseSample / (float) fadeSamples;
+            const auto t = (float) voice.releaseSample / (float) envelopeFadeSamples;
             voice.envelope = voice.releaseStartEnvelope * juce::jlimit (0.0f, 1.0f, 1.0f - t);
             ++voice.releaseSample;
 
-            if (voice.releaseSample >= fadeSamples)
+            if (voice.releaseSample >= envelopeFadeSamples)
             {
                 voice.active = false;
                 break;
@@ -204,21 +212,40 @@ void FronasmaskinenAudioProcessor::renderVoice (Voice& voice, juce::AudioBuffer<
         }
 
         while (voice.positionSamples >= end)
+        {
             voice.positionSamples -= loopLength;
+            if (canUsePostRoll)
+                voice.seamCrossfadeActive = true;
+            else
+                voice.positionSamples += (double) seamFade;
+        }
 
+        const auto loopOffset = voice.positionSamples - start;
         const auto distanceToEnd = end - voice.positionSamples;
-        const auto xfade = distanceToEnd < seamFade ? 1.0 - (distanceToEnd / (double) seamFade) : 0.0;
-        const auto wrappedPosition = start + (double) seamFade - distanceToEnd;
+        const auto preRollXfade = ! canUsePostRoll && distanceToEnd < seamFade
+                                    ? 1.0 - (distanceToEnd / (double) seamFade)
+                                    : 0.0;
+        const auto preRollPosition = start + (double) seamFade - distanceToEnd;
+        const auto seamProgress = seamFade > 0 ? loopOffset / (double) seamFade : 1.0;
+        const auto seamXfade = voice.seamCrossfadeActive ? juce::jlimit (0.0, 1.0, seamProgress) : 1.0;
+        const auto postRollPosition = end + loopOffset;
+        if (voice.seamCrossfadeActive && (seamProgress >= 1.0 || postRollPosition >= sampleCount - 1.0))
+            voice.seamCrossfadeActive = false;
 
         for (int channel = 0; channel < channels; ++channel)
         {
             const auto sourceChannel = sourceChannels == 1 ? 0 : juce::jmin (channel, sourceChannels - 1);
             auto value = readSample (sourceChannel, voice.positionSamples);
 
-            if (xfade > 0.0)
+            if (voice.seamCrossfadeActive)
             {
-                const auto wrapped = readSample (sourceChannel, wrappedPosition);
-                value = (float) ((value * (1.0 - xfade)) + (wrapped * xfade));
+                const auto tail = readSample (sourceChannel, postRollPosition);
+                value = (float) ((tail * (1.0 - seamXfade)) + (value * seamXfade));
+            }
+            else if (preRollXfade > 0.0)
+            {
+                const auto head = readSample (sourceChannel, preRollPosition);
+                value = (float) ((value * (1.0 - preRollXfade)) + (head * preRollXfade));
             }
 
             output.addSample (channel, startSample + sample, value * gain * voice.envelope);
@@ -240,19 +267,26 @@ void FronasmaskinenAudioProcessor::renderPreview (juce::AudioBuffer<float>& outp
     auto loopEnd = preview.loopEndSeconds * sampleBufferRate;
     auto loopLength = loopEnd - loopStart;
     const auto canLoop = preview.loopActive && loopLength >= 1.0;
-    const auto seamFade = canLoop ? juce::jlimit (1, (int) std::floor (loopLength * 0.45), crossfadeSamples) : 1;
     auto gain = 1.0f;
+    auto envelopeFadeSamples = fadeSamples;
+    auto seamFade = 1;
+    auto canUsePostRoll = false;
     if (canLoop && selectedSlot >= 0 && selectedSlot < slotCount && slots[(size_t) selectedSlot].filled)
+    {
         gain = dbToGain (slots[(size_t) selectedSlot].gainDb);
+        envelopeFadeSamples = slotFadeSamplesForHost (slots[(size_t) selectedSlot]);
+        seamFade = slotFadeSamplesForSource (slots[(size_t) selectedSlot], loopLength);
+        canUsePostRoll = loopEnd + (double) seamFade < sampleCount - 1.0;
+    }
 
     for (int sample = 0; sample < numSamples; ++sample)
     {
         if (! preview.playing)
             break;
 
-        if (preview.attackSample < fadeSamples && ! preview.releasing)
+        if (preview.attackSample < envelopeFadeSamples && ! preview.releasing)
         {
-            preview.envelope = (float) preview.attackSample / (float) fadeSamples;
+            preview.envelope = (float) preview.attackSample / (float) envelopeFadeSamples;
             ++preview.attackSample;
         }
         else if (! preview.releasing)
@@ -262,11 +296,11 @@ void FronasmaskinenAudioProcessor::renderPreview (juce::AudioBuffer<float>& outp
 
         if (preview.releasing)
         {
-            const auto t = (float) preview.releaseSample / (float) fadeSamples;
+            const auto t = (float) preview.releaseSample / (float) envelopeFadeSamples;
             preview.envelope = preview.releaseStartEnvelope * juce::jlimit (0.0f, 1.0f, 1.0f - t);
             ++preview.releaseSample;
 
-            if (preview.releaseSample >= fadeSamples)
+            if (preview.releaseSample >= envelopeFadeSamples)
             {
                 preview.playing = false;
                 preview.releasing = false;
@@ -278,7 +312,13 @@ void FronasmaskinenAudioProcessor::renderPreview (juce::AudioBuffer<float>& outp
         if (canLoop)
         {
             while (preview.positionSamples >= loopEnd)
+            {
                 preview.positionSamples -= loopLength;
+                if (canUsePostRoll)
+                    preview.seamCrossfadeActive = true;
+                else
+                    preview.positionSamples += (double) seamFade;
+            }
         }
         else if (preview.positionSamples >= sampleCount - 1.0)
         {
@@ -288,30 +328,67 @@ void FronasmaskinenAudioProcessor::renderPreview (juce::AudioBuffer<float>& outp
             break;
         }
 
-        auto xfade = 0.0;
-        auto wrappedPosition = loopStart;
-        if (canLoop)
-        {
-            const auto distanceToEnd = loopEnd - preview.positionSamples;
-            xfade = distanceToEnd < seamFade ? 1.0 - (distanceToEnd / (double) seamFade) : 0.0;
-            wrappedPosition = loopStart + (double) seamFade - distanceToEnd;
-        }
+        const auto loopOffset = preview.positionSamples - loopStart;
+        const auto distanceToEnd = loopEnd - preview.positionSamples;
+        const auto preRollXfade = canLoop && ! canUsePostRoll && distanceToEnd < seamFade
+                                    ? 1.0 - (distanceToEnd / (double) seamFade)
+                                    : 0.0;
+        const auto preRollPosition = loopStart + (double) seamFade - distanceToEnd;
+        const auto seamProgress = seamFade > 0 ? loopOffset / (double) seamFade : 1.0;
+        const auto seamXfade = preview.seamCrossfadeActive ? juce::jlimit (0.0, 1.0, seamProgress) : 1.0;
+        const auto postRollPosition = loopEnd + loopOffset;
+        if (preview.seamCrossfadeActive && (seamProgress >= 1.0 || postRollPosition >= sampleCount - 1.0))
+            preview.seamCrossfadeActive = false;
+
+        const auto transitionMix = preview.slotTransitionActive
+            ? juce::jlimit (0.0, 1.0, (double) preview.transitionSample / (double) preview.transitionSamples)
+            : 1.0;
 
         for (int channel = 0; channel < channels; ++channel)
         {
             const auto sourceChannel = sourceChannels == 1 ? 0 : juce::jmin (channel, sourceChannels - 1);
             auto value = readSample (sourceChannel, preview.positionSamples);
 
-            if (xfade > 0.0)
+            if (preview.seamCrossfadeActive)
             {
-                const auto wrapped = readSample (sourceChannel, wrappedPosition);
-                value = (float) ((value * (1.0 - xfade)) + (wrapped * xfade));
+                const auto tail = readSample (sourceChannel, postRollPosition);
+                value = (float) ((tail * (1.0 - seamXfade)) + (value * seamXfade));
+            }
+            else if (preRollXfade > 0.0)
+            {
+                const auto head = readSample (sourceChannel, preRollPosition);
+                value = (float) ((value * (1.0 - preRollXfade)) + (head * preRollXfade));
             }
 
-            output.addSample (channel, startSample + sample, value * preview.envelope * gain);
+            if (preview.slotTransitionActive)
+            {
+                const auto oldValue = readSample (sourceChannel, preview.transitionPositionSamples)
+                                    * (float) preview.transitionGain;
+                value = (float) ((oldValue * (1.0 - transitionMix)) + ((value * gain) * transitionMix));
+                output.addSample (channel, startSample + sample, value * preview.envelope);
+            }
+            else
+            {
+                output.addSample (channel, startSample + sample, value * preview.envelope * gain);
+            }
         }
 
         preview.positionSamples += sampleBufferRate / hostSampleRate;
+
+        if (preview.slotTransitionActive)
+        {
+            preview.transitionPositionSamples += sampleBufferRate / hostSampleRate;
+            const auto transitionLength = preview.transitionLoopEndSamples - preview.transitionLoopStartSamples;
+            if (transitionLength >= 1.0)
+            {
+                while (preview.transitionPositionSamples >= preview.transitionLoopEndSamples)
+                    preview.transitionPositionSamples -= transitionLength;
+            }
+
+            ++preview.transitionSample;
+            if (preview.transitionSample >= preview.transitionSamples)
+                preview.slotTransitionActive = false;
+        }
     }
 }
 
@@ -326,6 +403,19 @@ float FronasmaskinenAudioProcessor::readSample (int channel, double absoluteSamp
     const auto fraction = (float) (bounded - (double) index);
     const auto* data = sampleBuffer.getReadPointer (channel);
     return data[index] + ((data[index + 1] - data[index]) * fraction);
+}
+
+int FronasmaskinenAudioProcessor::slotFadeSamplesForHost (const Slot& slot) const
+{
+    const auto fadeSecondsToUse = clampDouble (slot.fadeSeconds, minFadeSeconds, maxFadeSeconds);
+    return juce::jmax (1, (int) std::round (fadeSecondsToUse * hostSampleRate));
+}
+
+int FronasmaskinenAudioProcessor::slotFadeSamplesForSource (const Slot& slot, double loopLengthSamples) const
+{
+    const auto fadeSecondsToUse = clampDouble (slot.fadeSeconds, minFadeSeconds, maxFadeSeconds);
+    const auto fadeSamplesForSource = (int) std::round (fadeSecondsToUse * sampleBufferRate);
+    return juce::jlimit (1, (int) std::floor (loopLengthSamples * 0.45), fadeSamplesForSource);
 }
 
 std::pair<double, double> FronasmaskinenAudioProcessor::effectiveSlotBoundsSamples (const Slot& slot) const
@@ -416,6 +506,7 @@ void FronasmaskinenAudioProcessor::playPreview()
     preview.attackSample = 0;
     preview.releaseSample = 0;
     preview.envelope = 0.0f;
+    preview.seamCrossfadeActive = false;
 
     if (preview.positionSamples >= sampleBuffer.getNumSamples() - 1)
         preview.positionSamples = 0.0;
@@ -460,6 +551,8 @@ void FronasmaskinenAudioProcessor::seekPreview (double positionSeconds)
         return;
 
     preview.positionSamples = clampDouble (positionSeconds, 0.0, duration) * sampleBufferRate;
+    preview.seamCrossfadeActive = false;
+    preview.slotTransitionActive = false;
     if (preview.loopActive && (positionSeconds < preview.loopStartSeconds || positionSeconds >= preview.loopEndSeconds))
     {
         preview.loopActive = false;
@@ -489,11 +582,13 @@ bool FronasmaskinenAudioProcessor::setLoopPointAtPreviewPosition()
         return false;
 
     preview.pendingLoopStartActive = false;
-    if (! saveLoopToNextSlot (start, end))
+    if (! saveLoopToNextSlot (start, end, true))
         return false;
 
     activateLoopFromSelectedSlot();
-    preview.positionSamples = start * sampleBufferRate;
+    preview.positionSamples = preview.loopStartSeconds * sampleBufferRate;
+    preview.attackSample = 0;
+    preview.envelope = 0.0f;
     return true;
 }
 
@@ -502,6 +597,7 @@ void FronasmaskinenAudioProcessor::releasePreviewLoop()
     const juce::ScopedLock lock (dataLock);
     preview.loopActive = false;
     preview.pendingLoopStartActive = false;
+    preview.slotTransitionActive = false;
 }
 
 bool FronasmaskinenAudioProcessor::randomizePreviewLoopStart()
@@ -523,7 +619,7 @@ bool FronasmaskinenAudioProcessor::randomizePreviewLoopStart()
 
     const auto start = juce::Random::getSystemRandom().nextDouble() * maxStart;
     const auto end = start + lengthSeconds;
-    if (! saveLoopToNextSlot (start, end))
+    if (! saveLoopToNextSlot (start, end, false))
         return false;
 
     activateLoopFromSelectedSlot();
@@ -582,6 +678,7 @@ bool FronasmaskinenAudioProcessor::saveSelectionToSlot (int slotIndex)
     slot.baseEndSeconds = selectionEndSeconds;
     slot.startTrimSeconds = 0.0;
     slot.endTrimSeconds = 0.0;
+    slot.fadeSeconds = defaultFadeSeconds;
     slot.gainDb = 0.0f;
     selectedSlot = slotIndex;
     activateLoopFromSelectedSlot();
@@ -598,6 +695,7 @@ bool FronasmaskinenAudioProcessor::selectSlot (int slotIndex)
     if (! slot.filled)
         return false;
 
+    beginPreviewSlotTransition (slotIndex);
     selectedSlot = slotIndex;
     selectionStartSeconds = slot.baseStartSeconds;
     selectionEndSeconds = slot.baseEndSeconds;
@@ -643,6 +741,20 @@ void FronasmaskinenAudioProcessor::setSelectedSlotTrim (double startTrimSeconds,
 
     slot.startTrimSeconds = startTrimSeconds;
     slot.endTrimSeconds = endTrimSeconds;
+    activateLoopFromSelectedSlot();
+}
+
+void FronasmaskinenAudioProcessor::setSelectedSlotFadeSeconds (double fadeSecondsToUse)
+{
+    const juce::ScopedLock lock (dataLock);
+    if (selectedSlot < 0 || selectedSlot >= slotCount)
+        return;
+
+    auto& slot = slots[(size_t) selectedSlot];
+    if (! slot.filled)
+        return;
+
+    slot.fadeSeconds = clampDouble (fadeSecondsToUse, minFadeSeconds, maxFadeSeconds);
     activateLoopFromSelectedSlot();
 }
 
@@ -728,6 +840,32 @@ std::pair<double, double> FronasmaskinenAudioProcessor::effectiveSelectedSlotBou
     return { bounds.first / sampleBufferRate, bounds.second / sampleBufferRate };
 }
 
+void FronasmaskinenAudioProcessor::beginPreviewSlotTransition (int nextSlotIndex)
+{
+    if (! preview.playing || ! preview.loopActive || nextSlotIndex < 0 || nextSlotIndex >= slotCount)
+        return;
+
+    if (selectedSlot == nextSlotIndex || selectedSlot < 0 || selectedSlot >= slotCount)
+        return;
+
+    const auto& currentSlot = slots[(size_t) selectedSlot];
+    const auto& nextSlot = slots[(size_t) nextSlotIndex];
+    if (! currentSlot.filled || ! nextSlot.filled)
+        return;
+
+    const auto currentBounds = effectiveSlotBoundsSamples (currentSlot);
+    if (currentBounds.second - currentBounds.first < 1.0)
+        return;
+
+    preview.slotTransitionActive = true;
+    preview.transitionPositionSamples = preview.positionSamples;
+    preview.transitionLoopStartSamples = currentBounds.first;
+    preview.transitionLoopEndSamples = currentBounds.second;
+    preview.transitionGain = dbToGain (currentSlot.gainDb);
+    preview.transitionSample = 0;
+    preview.transitionSamples = slotFadeSamplesForHost (nextSlot);
+}
+
 bool FronasmaskinenAudioProcessor::swapFilledSlots (int slotIndex, int targetSlotIndex)
 {
     if (slotIndex < 0 || slotIndex >= slotCount || targetSlotIndex < 0 || targetSlotIndex >= slotCount)
@@ -769,22 +907,98 @@ bool FronasmaskinenAudioProcessor::swapFilledSlots (int slotIndex, int targetSlo
     return true;
 }
 
-bool FronasmaskinenAudioProcessor::saveLoopToNextSlot (double startSeconds, double endSeconds)
+std::pair<double, double> FronasmaskinenAudioProcessor::findSmoothLoopBoundsSeconds (double startSeconds, double endSeconds) const
+{
+    const auto duration = getSampleDurationSeconds();
+    if (duration <= minLoopSeconds || sampleBuffer.getNumSamples() <= 2)
+        return { startSeconds, endSeconds };
+
+    const auto boundedStart = clampDouble (startSeconds, 0.0, duration - minLoopSeconds);
+    const auto boundedEnd = clampDouble (endSeconds, boundedStart + minLoopSeconds, duration);
+    const auto originalStartSample = boundedStart * sampleBufferRate;
+    const auto originalEndSample = boundedEnd * sampleBufferRate;
+    const auto originalScore = loopEndpointMatchScore (originalStartSample, originalEndSample);
+
+    auto bestStart = boundedStart;
+    auto bestEnd = boundedEnd;
+    auto bestScore = originalScore;
+
+    const auto minStart = clampDouble (boundedStart - maxLoopEndpointAdjustSeconds, 0.0, duration - minLoopSeconds);
+    const auto maxStart = clampDouble (boundedStart + maxLoopEndpointAdjustSeconds, 0.0, duration - minLoopSeconds);
+    const auto minEnd = clampDouble (boundedEnd - maxLoopEndpointAdjustSeconds, minStart + minLoopSeconds, duration);
+    const auto maxEnd = clampDouble (boundedEnd + maxLoopEndpointAdjustSeconds, minStart + minLoopSeconds, duration);
+    const auto step = juce::jmax (loopEndpointSearchStepSeconds, 1.0 / sampleBufferRate);
+
+    for (auto candidateStart = minStart; candidateStart <= maxStart; candidateStart += step)
+    {
+        const auto candidateMinEnd = juce::jmax (minEnd, candidateStart + minLoopSeconds);
+        if (candidateMinEnd > maxEnd)
+            continue;
+
+        for (auto candidateEnd = candidateMinEnd; candidateEnd <= maxEnd; candidateEnd += step)
+        {
+            const auto startOffset = std::abs (candidateStart - boundedStart);
+            const auto endOffset = std::abs (candidateEnd - boundedEnd);
+            const auto intentPenalty = (startOffset + endOffset) * 0.015;
+            const auto lengthPenalty = std::abs ((candidateEnd - candidateStart) - (boundedEnd - boundedStart)) * 0.010;
+            const auto score = loopEndpointMatchScore (candidateStart * sampleBufferRate, candidateEnd * sampleBufferRate)
+                             + intentPenalty
+                             + lengthPenalty;
+
+            if (score < bestScore)
+            {
+                bestScore = score;
+                bestStart = candidateStart;
+                bestEnd = candidateEnd;
+            }
+        }
+    }
+
+    return { bestStart, bestEnd };
+}
+
+double FronasmaskinenAudioProcessor::loopEndpointMatchScore (double startSample, double endSample) const
+{
+    const auto sourceChannels = sampleBuffer.getNumChannels();
+    if (sourceChannels <= 0)
+        return 0.0;
+
+    auto score = 0.0;
+    for (int channel = 0; channel < sourceChannels; ++channel)
+    {
+        const auto startValue = readSample (channel, startSample);
+        const auto endValue = readSample (channel, endSample);
+        const auto startSlope = readSample (channel, startSample + 1.0) - readSample (channel, startSample - 1.0);
+        const auto endSlope = readSample (channel, endSample + 1.0) - readSample (channel, endSample - 1.0);
+
+        score += std::abs ((double) startValue - (double) endValue);
+        score += std::abs ((double) startSlope - (double) endSlope) * 0.5;
+        score += (std::abs ((double) startValue) + std::abs ((double) endValue)) * 0.05;
+    }
+
+    return score / (double) sourceChannels;
+}
+
+bool FronasmaskinenAudioProcessor::saveLoopToNextSlot (double startSeconds, double endSeconds, bool smoothLoopBounds)
 {
     const auto nextSlot = std::find_if (slots.begin(), slots.end(), [] (const Slot& slot) { return ! slot.filled; });
     if (nextSlot == slots.end())
         return false;
 
+    const auto bounds = smoothLoopBounds ? findSmoothLoopBoundsSeconds (startSeconds, endSeconds)
+                                         : std::pair<double, double> { startSeconds, endSeconds };
+
     auto& slot = *nextSlot;
     slot.filled = true;
-    slot.baseStartSeconds = startSeconds;
-    slot.baseEndSeconds = endSeconds;
+    slot.baseStartSeconds = bounds.first;
+    slot.baseEndSeconds = bounds.second;
     slot.startTrimSeconds = 0.0;
     slot.endTrimSeconds = 0.0;
+    slot.fadeSeconds = defaultFadeSeconds;
     slot.gainDb = 0.0f;
     selectedSlot = (int) std::distance (slots.begin(), nextSlot);
-    selectionStartSeconds = startSeconds;
-    selectionEndSeconds = endSeconds;
+    selectionStartSeconds = bounds.first;
+    selectionEndSeconds = bounds.second;
     return true;
 }
 
@@ -798,6 +1012,7 @@ void FronasmaskinenAudioProcessor::activateLoopFromSelectedSlot()
     preview.loopEndSeconds = bounds.second;
     preview.loopActive = true;
     preview.pendingLoopStartActive = false;
+    preview.seamCrossfadeActive = false;
 }
 
 void FronasmaskinenAudioProcessor::rebuildWaveformThumbnail()
@@ -852,6 +1067,7 @@ void FronasmaskinenAudioProcessor::getStateInformation (juce::MemoryBlock& destD
         child->setAttribute ("baseEnd", slot.baseEndSeconds);
         child->setAttribute ("startTrim", slot.startTrimSeconds);
         child->setAttribute ("endTrim", slot.endTrimSeconds);
+        child->setAttribute ("fade", slot.fadeSeconds);
         child->setAttribute ("gainDb", (double) slot.gainDb);
     }
 
@@ -888,6 +1104,7 @@ void FronasmaskinenAudioProcessor::setStateInformation (const void* data, int si
         slot.baseEndSeconds = child->getDoubleAttribute ("baseEnd", defaultLoopSeconds);
         slot.startTrimSeconds = child->getDoubleAttribute ("startTrim", 0.0);
         slot.endTrimSeconds = child->getDoubleAttribute ("endTrim", 0.0);
+        slot.fadeSeconds = child->getDoubleAttribute ("fade", defaultFadeSeconds);
         slot.gainDb = (float) child->getDoubleAttribute ("gainDb", 0.0);
     }
 }

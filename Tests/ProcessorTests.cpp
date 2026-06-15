@@ -11,6 +11,12 @@ struct TestFailure
     juce::String message;
 };
 
+struct RenderEdge
+{
+    float first = 0.0f;
+    float last = 0.0f;
+};
+
 void expect (bool condition, const juce::String& message)
 {
     if (! condition)
@@ -50,6 +56,101 @@ juce::File createTestSample()
     return file;
 }
 
+juce::File createClickyLoopSample()
+{
+    const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        .getNonexistentChildFile ("fronasmaskinen-clicky-loop-sample", ".wav");
+
+    constexpr double sampleRate = 44100.0;
+    constexpr int numSamples = 44100;
+    juce::AudioBuffer<float> buffer (1, numSamples);
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const auto seconds = (double) i / sampleRate;
+        auto value = seconds < 0.14 ? 0.8f : -0.8f;
+
+        if ((seconds >= 0.104 && seconds <= 0.108) || (seconds >= 0.184 && seconds <= 0.188))
+            value = 0.0f;
+
+        buffer.setSample (0, i, value);
+    }
+
+    juce::WavAudioFormat format;
+    std::unique_ptr<juce::FileOutputStream> stream (file.createOutputStream());
+    expect (stream != nullptr, "Could not create clicky WAV fixture stream");
+
+    std::unique_ptr<juce::AudioFormatWriter> writer (format.createWriterFor (stream.get(), sampleRate, 1, 24, {}, 0));
+    expect (writer != nullptr, "Could not create clicky WAV fixture writer");
+    stream.release();
+
+    expect (writer->writeFromAudioSampleBuffer (buffer, 0, buffer.getNumSamples()), "Could not write clicky WAV fixture");
+    return file;
+}
+
+juce::File createLoopSeamRampSample()
+{
+    const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        .getNonexistentChildFile ("fronasmaskinen-loop-seam-ramp-sample", ".wav");
+
+    constexpr double sampleRate = 44100.0;
+    constexpr int numSamples = 44100;
+    juce::AudioBuffer<float> buffer (1, numSamples);
+
+    buffer.clear();
+    const auto startSample = (int) std::round (0.10 * sampleRate);
+    const auto endSample = (int) std::round (0.20 * sampleRate);
+    const auto fadeSamples = (int) std::round (0.012 * sampleRate);
+
+    for (int i = startSample; i < startSample + fadeSamples; ++i)
+    {
+        const auto t = (float) (i - startSample) / (float) fadeSamples;
+        buffer.setSample (0, i, -0.9f + (1.8f * t));
+    }
+
+    for (int i = startSample + fadeSamples; i < endSample + fadeSamples && i < numSamples; ++i)
+        buffer.setSample (0, i, 0.9f);
+
+    juce::WavAudioFormat format;
+    std::unique_ptr<juce::FileOutputStream> stream (file.createOutputStream());
+    expect (stream != nullptr, "Could not create seam WAV fixture stream");
+
+    std::unique_ptr<juce::AudioFormatWriter> writer (format.createWriterFor (stream.get(), sampleRate, 1, 24, {}, 0));
+    expect (writer != nullptr, "Could not create seam WAV fixture writer");
+    stream.release();
+
+    expect (writer->writeFromAudioSampleBuffer (buffer, 0, buffer.getNumSamples()), "Could not write seam WAV fixture");
+    return file;
+}
+
+juce::File createSlotSwitchSample()
+{
+    const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        .getNonexistentChildFile ("fronasmaskinen-slot-switch-sample", ".wav");
+
+    constexpr double sampleRate = 44100.0;
+    constexpr int numSamples = 44100;
+    juce::AudioBuffer<float> buffer (1, numSamples);
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const auto seconds = (double) i / sampleRate;
+        const auto value = seconds < 0.30 ? 0.7f : -0.7f;
+        buffer.setSample (0, i, value);
+    }
+
+    juce::WavAudioFormat format;
+    std::unique_ptr<juce::FileOutputStream> stream (file.createOutputStream());
+    expect (stream != nullptr, "Could not create slot switch WAV fixture stream");
+
+    std::unique_ptr<juce::AudioFormatWriter> writer (format.createWriterFor (stream.get(), sampleRate, 1, 24, {}, 0));
+    expect (writer != nullptr, "Could not create slot switch WAV fixture writer");
+    stream.release();
+
+    expect (writer->writeFromAudioSampleBuffer (buffer, 0, buffer.getNumSamples()), "Could not write slot switch WAV fixture");
+    return file;
+}
+
 void processMidiNote (FronasmaskinenAudioProcessor& processor, int noteNumber, bool noteOn)
 {
     juce::AudioBuffer<float> buffer (2, 256);
@@ -75,6 +176,56 @@ float renderPreviewRms (FronasmaskinenAudioProcessor& processor)
     juce::MidiBuffer midi;
     processor.processBlock (buffer, midi);
     return buffer.getRMSLevel (0, 0, buffer.getNumSamples());
+}
+
+float renderPreviewPeak (FronasmaskinenAudioProcessor& processor, int numSamples)
+{
+    juce::AudioBuffer<float> buffer (2, numSamples);
+    juce::MidiBuffer midi;
+    processor.processBlock (buffer, midi);
+
+    auto peak = 0.0f;
+    for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+    {
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        {
+            const auto value = buffer.getSample (channel, i);
+            expect (std::isfinite (value), "Preview playback should never render non-finite samples");
+            peak = juce::jmax (peak, std::abs (value));
+        }
+    }
+
+    return peak;
+}
+
+RenderEdge renderPreviewEdge (FronasmaskinenAudioProcessor& processor, int numSamples)
+{
+    juce::AudioBuffer<float> buffer (2, numSamples);
+    juce::MidiBuffer midi;
+    processor.processBlock (buffer, midi);
+    return { buffer.getSample (0, 0), buffer.getSample (0, buffer.getNumSamples() - 1) };
+}
+
+RenderEdge renderMidiEdge (FronasmaskinenAudioProcessor& processor, int noteNumber, int numSamples)
+{
+    juce::AudioBuffer<float> buffer (2, numSamples);
+    juce::MidiBuffer midi;
+    midi.addEvent (juce::MidiMessage::noteOn (1, noteNumber, (juce::uint8) 100), 0);
+    processor.processBlock (buffer, midi);
+    return { buffer.getSample (0, 0), buffer.getSample (0, buffer.getNumSamples() - 1) };
+}
+
+float renderPreviewMaxAdjacentDelta (FronasmaskinenAudioProcessor& processor, int numSamples)
+{
+    juce::AudioBuffer<float> buffer (2, numSamples);
+    juce::MidiBuffer midi;
+    processor.processBlock (buffer, midi);
+
+    auto maxDelta = 0.0f;
+    for (int i = 1; i < buffer.getNumSamples(); ++i)
+        maxDelta = juce::jmax (maxDelta, std::abs (buffer.getSample (0, i) - buffer.getSample (0, i - 1)));
+
+    return maxDelta;
 }
 
 void seekAndSetLoopPoint (FronasmaskinenAudioProcessor& processor, double seconds)
@@ -124,13 +275,57 @@ void testPreviewSeekPlayAndLoopSlotCreation()
     expect (! processor.hasPendingLoopStart(), "Second loop click should clear pending loop start");
     expect (processor.hasPreviewLoop(), "Second loop click should activate preview loop");
     expect (processor.getSelectedSlotIndex() == 0, "Created loop should select the next free slot");
-    expectNear (processor.getPreviewLoopStartSeconds(), 0.10, epsilon, "Preview loop start should match slot start");
-    expectNear (processor.getPreviewLoopEndSeconds(), 0.18, epsilon, "Preview loop end should match slot end");
 
     const auto slot = processor.getSlot (0);
     expect (slot.filled, "Created loop should fill S1");
-    expectNear (slot.baseStartSeconds, 0.10, epsilon, "S1 should store base start");
-    expectNear (slot.baseEndSeconds, 0.18, epsilon, "S1 should store base end");
+    expect (std::abs (slot.baseStartSeconds - 0.10) <= 0.400, "S1 should keep base start near the chosen start");
+    expect (std::abs (slot.baseEndSeconds - 0.18) <= 0.400, "S1 should keep base end near the chosen end");
+    expect (slot.baseEndSeconds - slot.baseStartSeconds >= 0.02, "Created loop should keep the minimum loop length");
+    expectNear (processor.getPreviewLoopStartSeconds(), slot.baseStartSeconds, epsilon,
+                "Preview loop start should match smoothed slot start");
+    expectNear (processor.getPreviewLoopEndSeconds(), slot.baseEndSeconds, epsilon,
+                "Preview loop end should match smoothed slot end");
+
+    sample.deleteFile();
+}
+
+void testPreviewPlaybackWithoutLoopDoesNotClip()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createTestSample();
+    expect (processor.loadAudioFile (sample), "Sample should load");
+    processor.prepareToPlay (44100.0, 4096);
+
+    processor.playPreview();
+
+    const auto peak = renderPreviewPeak (processor, 4096);
+    expect (peak <= 0.81f, "Unlooped preview playback should stay near source level, got " + juce::String (peak, 6));
+
+    sample.deleteFile();
+}
+
+void testLoopPointCreationSnapsToNearbySmoothSeam()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createClickyLoopSample();
+    expect (processor.loadAudioFile (sample), "Clicky sample should load");
+
+    processor.playPreview();
+    seekAndSetLoopPoint (processor, 0.100);
+    seekAndSetLoopPoint (processor, 0.180);
+
+    const auto slot = processor.getSlot (0);
+    expect (slot.filled, "Smooth loop creation should fill S1");
+    expect (std::abs (slot.baseStartSeconds - 0.100) <= 0.400, "Loop start should stay near the chosen start");
+    expect (std::abs (slot.baseEndSeconds - 0.180) <= 0.400, "Loop end should stay near the chosen end");
+    expect (slot.baseStartSeconds >= 0.104 && slot.baseStartSeconds <= 0.108,
+            "Loop start should snap to the nearby quiet crossing");
+    expect (slot.baseEndSeconds >= 0.184 && slot.baseEndSeconds <= 0.188,
+            "Loop end should snap to the nearby quiet crossing");
+    expectNear (processor.getPreviewLoopStartSeconds(), slot.baseStartSeconds, epsilon,
+                "Preview loop start should use the smoothed slot start");
+    expectNear (processor.getPreviewLoopEndSeconds(), slot.baseEndSeconds, epsilon,
+                "Preview loop end should use the smoothed slot end");
 
     sample.deleteFile();
 }
@@ -148,16 +343,19 @@ void testSlotTrimAndGainPersistence()
 
     expect (processor.selectSlot (0), "Should select S1");
     processor.setSelectedSlotTrim (0.011, -0.014);
+    processor.setSelectedSlotFadeSeconds (0.048);
     processor.setSelectedSlotGainDb (-7.5f);
 
     expect (processor.selectSlot (1), "Should select S2");
     processor.setSelectedSlotTrim (0.020, -0.010);
+    processor.setSelectedSlotFadeSeconds (0.006);
     processor.setSelectedSlotGainDb (3.0f);
 
     expect (processor.selectSlot (0), "Should return to S1");
     auto slot = processor.getSlot (0);
     expectNear (slot.startTrimSeconds, 0.011, epsilon, "S1 should persist start trim");
     expectNear (slot.endTrimSeconds, -0.014, epsilon, "S1 should persist end trim");
+    expectNear (slot.fadeSeconds, 0.048, epsilon, "S1 should persist fade");
     expectNear (slot.gainDb, -7.5, epsilon, "S1 should persist gain");
     expectNear (processor.getPreviewLoopStartSeconds(), 0.111, epsilon, "Trim should update active loop start");
     expectNear (processor.getPreviewLoopEndSeconds(), 0.186, epsilon, "Trim should update active loop end");
@@ -166,12 +364,87 @@ void testSlotTrimAndGainPersistence()
     slot = processor.getSlot (1);
     expectNear (slot.startTrimSeconds, 0.020, epsilon, "S2 should persist start trim independently");
     expectNear (slot.endTrimSeconds, -0.010, epsilon, "S2 should persist end trim independently");
+    expectNear (slot.fadeSeconds, 0.006, epsilon, "S2 should persist fade independently");
     expectNear (slot.gainDb, 3.0, epsilon, "S2 should persist gain independently");
+
+    processor.setSelectedSlotFadeSeconds (0.200);
+    expectNear (processor.getSlot (1).fadeSeconds, 0.080, epsilon, "Slot fade should clamp to max");
+    processor.setSelectedSlotFadeSeconds (0.001);
+    expectNear (processor.getSlot (1).fadeSeconds, 0.002, epsilon, "Slot fade should clamp to min");
 
     processor.setSelectedSlotGainDb (24.0f);
     expectNear (processor.getSlot (1).gainDb, 6.0, epsilon, "Slot gain should clamp to max");
     processor.setSelectedSlotGainDb (-99.0f);
     expectNear (processor.getSlot (1).gainDb, -24.0, epsilon, "Slot gain should clamp to min");
+
+    sample.deleteFile();
+}
+
+void testPreviewLoopSeamUsesPostRollCrossfade()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createLoopSeamRampSample();
+    expect (processor.loadAudioFile (sample), "Seam sample should load");
+    processor.prepareToPlay (44100.0, 8192);
+
+    processor.setSelection (0.10, 0.20);
+    expect (processor.saveSelectionToSlot (0), "Should save seam loop to S1");
+    processor.seekPreview (0.10);
+    processor.playPreview();
+
+    const auto maxDelta = renderPreviewMaxAdjacentDelta (processor, 8192);
+    expect (maxDelta < 0.01f, "Loop seam crossfade should avoid a large wrap spike, got " + juce::String (maxDelta, 6));
+
+    sample.deleteFile();
+}
+
+void testPreviewSlotSwitchCrossfadesWhilePlaying()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createSlotSwitchSample();
+    expect (processor.loadAudioFile (sample), "Slot switch sample should load");
+    processor.prepareToPlay (44100.0, 4096);
+
+    processor.setSelection (0.10, 0.20);
+    expect (processor.saveSelectionToSlot (0), "Should save positive S1 loop");
+    processor.setSelection (0.40, 0.50);
+    expect (processor.saveSelectionToSlot (1), "Should save negative S2 loop");
+    expect (processor.selectSlot (0), "Should select S1");
+    processor.playPreview();
+
+    const auto before = renderPreviewEdge (processor, 4096);
+    expect (processor.selectSlot (1), "Switching to S2 while playing should work");
+    const auto after = renderPreviewEdge (processor, 64);
+
+    expect (std::abs (after.first - before.last) < 0.05f,
+            "Mouse slot switch should begin from the previous loop level instead of clicking");
+    expect (after.last < after.first,
+            "Mouse slot switch should fade toward the newly selected loop");
+
+    sample.deleteFile();
+}
+
+void testMidiSlotSwitchCrossfadesPreviewWhilePlaying()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createSlotSwitchSample();
+    expect (processor.loadAudioFile (sample), "Slot switch sample should load");
+    processor.prepareToPlay (44100.0, 4096);
+
+    processor.setSelection (0.10, 0.20);
+    expect (processor.saveSelectionToSlot (0), "Should save positive S1 loop");
+    processor.setSelection (0.40, 0.50);
+    expect (processor.saveSelectionToSlot (1), "Should save negative S2 loop");
+    expect (processor.selectSlot (0), "Should select S1");
+    processor.playPreview();
+
+    const auto before = renderPreviewEdge (processor, 4096);
+    const auto after = renderMidiEdge (processor, FronasmaskinenAudioProcessor::baseNote + 1, 64);
+
+    expect (std::abs (after.first - before.last) < 0.05f,
+            "MIDI slot switch should begin from the previous loop level instead of clicking");
+    expect (after.last < after.first,
+            "MIDI slot switch should fade toward the newly triggered loop");
 
     sample.deleteFile();
 }
@@ -227,14 +500,17 @@ void testSelectingSlotDuringPreviewMovesPlayheadIntoSlot()
 
     seekAndSetLoopPoint (processor, 0.60);
     seekAndSetLoopPoint (processor, 0.68);
+    const auto slot3 = processor.getSlot (2);
     expect (processor.getSelectedSlotIndex() == 2, "S3 should be active before selecting S1");
-    expectNear (processor.getPreviewLoopStartSeconds(), 0.60, epsilon, "S3 loop should be active");
+    expectNear (processor.getPreviewLoopStartSeconds(), slot3.baseStartSeconds, epsilon, "S3 loop should be active");
 
     expect (processor.selectSlot (0), "Clicking S1 while preview plays should select it");
+    const auto slot1 = processor.getSlot (0);
     expect (processor.getSelectedSlotIndex() == 0, "S1 should become active");
-    expectNear (processor.getPreviewLoopStartSeconds(), 0.10, epsilon, "S1 loop start should become active");
-    expectNear (processor.getPreviewLoopEndSeconds(), 0.18, epsilon, "S1 loop end should become active");
-    expectNear (processor.getPreviewPositionSeconds(), 0.10, epsilon, "Preview playhead should move to S1 start");
+    expectNear (processor.getPreviewLoopStartSeconds(), slot1.baseStartSeconds, epsilon, "S1 loop start should become active");
+    expectNear (processor.getPreviewLoopEndSeconds(), slot1.baseEndSeconds, epsilon, "S1 loop end should become active");
+    expectNear (processor.getPreviewPositionSeconds(), slot1.baseStartSeconds, epsilon,
+                "Preview playhead should move to S1 start");
 
     sample.deleteFile();
 }
@@ -451,7 +727,12 @@ int main()
     {
         runTest ("sample loading and waveform thumbnail", testSampleLoadingAndWaveform);
         runTest ("preview seek, play, and loop slot creation", testPreviewSeekPlayAndLoopSlotCreation);
+        runTest ("preview playback without loop does not clip", testPreviewPlaybackWithoutLoopDoesNotClip);
+        runTest ("loop point creation snaps to nearby smooth seam", testLoopPointCreationSnapsToNearbySmoothSeam);
         runTest ("slot trim and gain persistence", testSlotTrimAndGainPersistence);
+        runTest ("preview loop seam uses post-roll crossfade", testPreviewLoopSeamUsesPostRollCrossfade);
+        runTest ("preview slot switch crossfades while playing", testPreviewSlotSwitchCrossfadesWhilePlaying);
+        runTest ("MIDI slot switch crossfades preview while playing", testMidiSlotSwitchCrossfadesPreviewWhilePlaying);
         runTest ("release and random start", testReleaseAndRandomStart);
         runTest ("slot selection moves playhead during preview", testSelectingSlotDuringPreviewMovesPlayheadIntoSlot);
         runTest ("slot mouse and MIDI triggers", testSlotMouseAndMidiTriggers);

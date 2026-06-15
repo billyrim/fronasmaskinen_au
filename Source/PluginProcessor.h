@@ -22,6 +22,7 @@ public:
         double baseEndSeconds = 0.25;
         double startTrimSeconds = 0.0;
         double endTrimSeconds = 0.0;
+        double fadeSeconds = 0.012;
         float gainDb = 0.0f;
     };
 
@@ -82,6 +83,7 @@ public:
     bool moveSlotRight (int slotIndex);
     void clearSlot (int slotIndex);
     void setSelectedSlotTrim (double startTrimSeconds, double endTrimSeconds);
+    void setSelectedSlotFadeSeconds (double fadeSeconds);
     void setSelectedSlotGainDb (float gainDb);
     int getSelectedSlotIndex() const;
     Slot getSlot (int slotIndex) const;
@@ -105,6 +107,7 @@ private:
         float releaseStartEnvelope = 0.0f;
         int attackSample = 0;
         int releaseSample = 0;
+        bool seamCrossfadeActive = false;
     };
 
     struct PreviewState
@@ -121,6 +124,14 @@ private:
         float releaseStartEnvelope = 0.0f;
         int attackSample = 0;
         int releaseSample = 0;
+        bool seamCrossfadeActive = false;
+        bool slotTransitionActive = false;
+        double transitionPositionSamples = 0.0;
+        double transitionLoopStartSamples = 0.0;
+        double transitionLoopEndSamples = 0.0;
+        double transitionGain = 1.0;
+        int transitionSample = 0;
+        int transitionSamples = 1;
     };
 
     juce::AudioFormatManager formatManager;
@@ -151,10 +162,15 @@ private:
     void renderVoice (Voice& voice, juce::AudioBuffer<float>& output, int startSample, int numSamples);
     void renderPreview (juce::AudioBuffer<float>& output, int startSample, int numSamples);
     float readSample (int channel, double absoluteSample) const;
+    int slotFadeSamplesForHost (const Slot& slot) const;
+    int slotFadeSamplesForSource (const Slot& slot, double loopLengthSamples) const;
     std::pair<double, double> effectiveSlotBoundsSamples (const Slot& slot) const;
     std::pair<double, double> effectiveSelectedSlotBoundsSeconds() const;
+    void beginPreviewSlotTransition (int nextSlotIndex);
     bool swapFilledSlots (int slotIndex, int targetSlotIndex);
-    bool saveLoopToNextSlot (double startSeconds, double endSeconds);
+    std::pair<double, double> findSmoothLoopBoundsSeconds (double startSeconds, double endSeconds) const;
+    double loopEndpointMatchScore (double startSample, double endSample) const;
+    bool saveLoopToNextSlot (double startSeconds, double endSeconds, bool smoothLoopBounds);
     void activateLoopFromSelectedSlot();
     void rebuildWaveformThumbnail();
     float selectedSlotGainDb() const;

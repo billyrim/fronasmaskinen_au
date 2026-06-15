@@ -47,11 +47,13 @@ private:
     juce::Slider endSlider;
     juce::Slider startTrimSlider;
     juce::Slider endTrimSlider;
+    juce::Slider fadeSlider;
     juce::Slider gainSlider;
     juce::Label startLabel;
     juce::Label endLabel;
     juce::Label startTrimLabel;
     juce::Label endTrimLabel;
+    juce::Label fadeLabel;
     juce::Label gainLabel;
     std::array<juce::TextButton, FronasmaskinenAudioProcessor::slotCount> slotButtons;
     std::array<juce::TextButton, FronasmaskinenAudioProcessor::slotCount> moveLeftButtons;
