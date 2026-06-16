@@ -25,6 +25,10 @@ public:
         double endTrimSeconds = 0.0;
         double fadeSeconds = 0.012;
         float gainDb = 0.0f;
+        double attackSeconds = 0.012;
+        double decaySeconds = 0.0;
+        float sustainLevel = 1.0f;
+        double releaseSeconds = 0.012;
     };
 
     FronasmaskinenAudioProcessor();
@@ -86,6 +90,7 @@ public:
     void setSelectedSlotTrim (double startTrimSeconds, double endTrimSeconds);
     void setSelectedSlotFadeSeconds (double fadeSeconds);
     void setSelectedSlotGainDb (float gainDb);
+    void setSelectedSlotAdsr (double attackSeconds, double decaySeconds, float sustainLevel, double releaseSeconds);
     int getSelectedSlotIndex() const;
     Slot getSlot (int slotIndex) const;
     juce::String describeSlot (int slotIndex) const;
@@ -96,6 +101,13 @@ public:
     int getActiveVoiceCount() const;
 
 private:
+    enum class EnvelopeStage
+    {
+        attack,
+        decay,
+        sustain
+    };
+
     struct Voice
     {
         bool active = false;
@@ -106,7 +118,9 @@ private:
         float velocityGain = 1.0f;
         float envelope = 0.0f;
         float releaseStartEnvelope = 0.0f;
+        EnvelopeStage envelopeStage = EnvelopeStage::attack;
         int attackSample = 0;
+        int decaySample = 0;
         int releaseSample = 0;
         bool seamCrossfadeActive = false;
     };

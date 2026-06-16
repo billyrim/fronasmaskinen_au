@@ -231,6 +231,14 @@ float renderMidiHeldBlockRms (FronasmaskinenAudioProcessor& processor)
     return buffer.getRMSLevel (0, 0, buffer.getNumSamples());
 }
 
+float renderMidiHeldBlockPeak (FronasmaskinenAudioProcessor& processor, int numSamples)
+{
+    juce::AudioBuffer<float> buffer (2, numSamples);
+    juce::MidiBuffer midi;
+    processor.processBlock (buffer, midi);
+    return buffer.getMagnitude (0, 0, buffer.getNumSamples());
+}
+
 float renderPreviewRms (FronasmaskinenAudioProcessor& processor)
 {
     juce::AudioBuffer<float> buffer (2, 2048);
@@ -463,11 +471,13 @@ void testSlotTrimAndGainPersistence()
     processor.setSelectedSlotTrim (0.011, -0.014);
     processor.setSelectedSlotFadeSeconds (0.048);
     processor.setSelectedSlotGainDb (-7.5f);
+    processor.setSelectedSlotAdsr (0.021, 0.032, 0.42f, 0.043);
 
     expect (processor.selectSlot (1), "Should select S2");
     processor.setSelectedSlotTrim (0.020, -0.010);
     processor.setSelectedSlotFadeSeconds (0.006);
     processor.setSelectedSlotGainDb (3.0f);
+    processor.setSelectedSlotAdsr (0.004, 0.007, 0.81f, 0.009);
 
     expect (processor.selectSlot (0), "Should return to S1");
     auto slot = processor.getSlot (0);
@@ -475,6 +485,10 @@ void testSlotTrimAndGainPersistence()
     expectNear (slot.endTrimSeconds, -0.014, epsilon, "S1 should persist end trim");
     expectNear (slot.fadeSeconds, 0.048, epsilon, "S1 should persist fade");
     expectNear (slot.gainDb, -7.5, epsilon, "S1 should persist gain");
+    expectNear (slot.attackSeconds, 0.021, epsilon, "S1 should persist attack");
+    expectNear (slot.decaySeconds, 0.032, epsilon, "S1 should persist decay");
+    expectNear (slot.sustainLevel, 0.42, epsilon, "S1 should persist sustain");
+    expectNear (slot.releaseSeconds, 0.043, epsilon, "S1 should persist release");
     expectNear (processor.getPreviewLoopStartSeconds(), 0.111, epsilon, "Trim should update active loop start");
     expectNear (processor.getPreviewLoopEndSeconds(), 0.186, epsilon, "Trim should update active loop end");
 
@@ -484,6 +498,10 @@ void testSlotTrimAndGainPersistence()
     expectNear (slot.endTrimSeconds, -0.010, epsilon, "S2 should persist end trim independently");
     expectNear (slot.fadeSeconds, 0.006, epsilon, "S2 should persist fade independently");
     expectNear (slot.gainDb, 3.0, epsilon, "S2 should persist gain independently");
+    expectNear (slot.attackSeconds, 0.004, epsilon, "S2 should persist attack independently");
+    expectNear (slot.decaySeconds, 0.007, epsilon, "S2 should persist decay independently");
+    expectNear (slot.sustainLevel, 0.81, epsilon, "S2 should persist sustain independently");
+    expectNear (slot.releaseSeconds, 0.009, epsilon, "S2 should persist release independently");
 
     processor.setSelectedSlotFadeSeconds (0.200);
     expectNear (processor.getSlot (1).fadeSeconds, 0.080, epsilon, "Slot fade should clamp to max");
@@ -494,6 +512,91 @@ void testSlotTrimAndGainPersistence()
     expectNear (processor.getSlot (1).gainDb, 6.0, epsilon, "Slot gain should clamp to max");
     processor.setSelectedSlotGainDb (-99.0f);
     expectNear (processor.getSlot (1).gainDb, -24.0, epsilon, "Slot gain should clamp to min");
+
+    processor.setSelectedSlotAdsr (-1.0, -2.0, -0.5f, -3.0);
+    slot = processor.getSlot (1);
+    expectNear (slot.attackSeconds, 0.0, epsilon, "Slot attack should clamp to min");
+    expectNear (slot.decaySeconds, 0.0, epsilon, "Slot decay should clamp to min");
+    expectNear (slot.sustainLevel, 0.0, epsilon, "Slot sustain should clamp to min");
+    expectNear (slot.releaseSeconds, 0.0, epsilon, "Slot release should clamp to min");
+
+    processor.setSelectedSlotAdsr (12.0, 13.0, 1.5f, 14.0);
+    slot = processor.getSlot (1);
+    expectNear (slot.attackSeconds, 5.0, epsilon, "Slot attack should clamp to max");
+    expectNear (slot.decaySeconds, 5.0, epsilon, "Slot decay should clamp to max");
+    expectNear (slot.sustainLevel, 1.0, epsilon, "Slot sustain should clamp to max");
+    expectNear (slot.releaseSeconds, 5.0, epsilon, "Slot release should clamp to max");
+
+    sample.deleteFile();
+}
+
+void testSlotAdsrShapesMidiVoiceWithoutLoopRetrigger()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createSlotSwitchSample();
+    expect (processor.loadAudioFile (sample), "Sample should load");
+    processor.prepareToPlay (44100.0, 256);
+
+    processor.setSelection (0.10, 0.12);
+    expect (processor.saveSelectionToSlot (0), "Should save S1");
+    processor.setSelectedSlotFadeSeconds (0.002);
+    processor.setSelectedSlotAdsr (0.050, 0.050, 0.25f, 0.050);
+
+    processMidiNote (processor, FronasmaskinenAudioProcessor::baseNote, true);
+
+    const auto attackPeak = renderMidiHeldBlockPeak (processor, 256);
+    const auto fullAttackPeak = renderMidiHeldBlockPeak (processor, 2048);
+    (void) renderMidiHeldBlockPeak (processor, 4096);
+    const auto sustainPeak = renderMidiHeldBlockPeak (processor, 2048);
+    const auto nextLoopPeak = renderMidiHeldBlockPeak (processor, 2048);
+
+    expect (fullAttackPeak > attackPeak * 2.0f, "ADSR attack should rise after note-on");
+    expect (sustainPeak < fullAttackPeak * 0.45f, "ADSR decay should fall toward sustain level");
+    expect (nextLoopPeak < fullAttackPeak * 0.45f, "ADSR should not retrigger attack when the slot loops");
+
+    processMidiNote (processor, FronasmaskinenAudioProcessor::baseNote, false);
+    const auto releaseStartPeak = renderMidiHeldBlockPeak (processor, 256);
+    (void) renderMidiHeldBlockPeak (processor, 4096);
+    const auto releaseEndPeak = renderMidiHeldBlockPeak (processor, 512);
+
+    expect (releaseStartPeak > 0.01f, "ADSR release should keep the voice audible after note-off");
+    expect (releaseEndPeak < releaseStartPeak * 0.40f, "ADSR release should fade the voice after note-off");
+
+    sample.deleteFile();
+}
+
+void testLegacyStateUsesSlotFadeAsDefaultAdsr()
+{
+    const auto sample = createTestSample();
+    juce::XmlElement root ("FronasmaskinenState");
+    root.setAttribute ("file", sample.getFullPathName());
+    root.setAttribute ("selectionStart", 0.10);
+    root.setAttribute ("selectionEnd", 0.20);
+    root.setAttribute ("selectedSlot", 0);
+
+    auto* slot = root.createNewChildElement ("Slot");
+    slot->setAttribute ("index", 0);
+    slot->setAttribute ("filled", true);
+    slot->setAttribute ("baseStart", 0.10);
+    slot->setAttribute ("baseEnd", 0.20);
+    slot->setAttribute ("startTrim", 0.0);
+    slot->setAttribute ("endTrim", 0.0);
+    slot->setAttribute ("fade", 0.047);
+    slot->setAttribute ("gainDb", 0.0);
+
+    juce::MemoryBlock state;
+    FronasmaskinenAudioProcessor::copyXmlToBinary (root, state);
+
+    auto processor = FronasmaskinenAudioProcessor();
+    processor.setStateInformation (state.getData(), (int) state.getSize());
+
+    const auto restored = processor.getSlot (0);
+    expect (restored.filled, "Legacy restored S1 should be filled");
+    expectNear (restored.fadeSeconds, 0.047, epsilon, "Legacy restored S1 should keep fade");
+    expectNear (restored.attackSeconds, 0.047, epsilon, "Legacy restored S1 attack should default to fade");
+    expectNear (restored.decaySeconds, 0.0, epsilon, "Legacy restored S1 decay should default to zero");
+    expectNear (restored.sustainLevel, 1.0, epsilon, "Legacy restored S1 sustain should default to full level");
+    expectNear (restored.releaseSeconds, 0.047, epsilon, "Legacy restored S1 release should default to fade");
 
     sample.deleteFile();
 }
@@ -509,6 +612,7 @@ void testProcessorStateRoundTripRestoresSampleSlotsAndSelectedLoop()
     processor.setSelectedSlotTrim (0.011, -0.013);
     processor.setSelectedSlotFadeSeconds (0.037);
     processor.setSelectedSlotGainDb (-8.0f);
+    processor.setSelectedSlotAdsr (0.020, 0.030, 0.45f, 0.040);
 
     processor.setSelection (0.40, 0.55);
     expect (processor.saveSelectionToSlot (1), "Should save S2");
@@ -537,6 +641,10 @@ void testProcessorStateRoundTripRestoresSampleSlotsAndSelectedLoop()
     expectNear (slot1.endTrimSeconds, -0.013, epsilon, "Restored S1 should keep end trim");
     expectNear (slot1.fadeSeconds, 0.037, epsilon, "Restored S1 should keep fade");
     expectNear (slot1.gainDb, -8.0, epsilon, "Restored S1 should keep gain");
+    expectNear (slot1.attackSeconds, 0.020, epsilon, "Restored S1 should keep attack");
+    expectNear (slot1.decaySeconds, 0.030, epsilon, "Restored S1 should keep decay");
+    expectNear (slot1.sustainLevel, 0.45, epsilon, "Restored S1 should keep sustain");
+    expectNear (slot1.releaseSeconds, 0.040, epsilon, "Restored S1 should keep release");
 
     const auto slot2 = restored.getSlot (1);
     expect (slot2.filled, "Restored S2 should be filled");
@@ -1056,6 +1164,8 @@ int main()
         runTest ("preview playback without loop does not clip", testPreviewPlaybackWithoutLoopDoesNotClip);
         runTest ("loop point creation snaps to nearby smooth seam", testLoopPointCreationSnapsToNearbySmoothSeam);
         runTest ("slot trim and gain persistence", testSlotTrimAndGainPersistence);
+        runTest ("slot ADSR shapes MIDI voice without loop retrigger", testSlotAdsrShapesMidiVoiceWithoutLoopRetrigger);
+        runTest ("legacy state uses slot fade as default ADSR", testLegacyStateUsesSlotFadeAsDefaultAdsr);
         runTest ("processor state round trip restores sample slots and selected loop",
                  testProcessorStateRoundTripRestoresSampleSlotsAndSelectedLoop);
         runTest ("preview loop seam uses post-roll crossfade", testPreviewLoopSeamUsesPostRollCrossfade);

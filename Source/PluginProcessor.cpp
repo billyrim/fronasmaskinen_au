@@ -8,6 +8,12 @@ constexpr double defaultLoopSeconds = 0.25;
 constexpr double defaultFadeSeconds = 0.012;
 constexpr double minFadeSeconds = 0.002;
 constexpr double maxFadeSeconds = 0.080;
+constexpr double defaultAttackSeconds = 0.012;
+constexpr double defaultDecaySeconds = 0.0;
+constexpr float defaultSustainLevel = 1.0f;
+constexpr double defaultReleaseSeconds = 0.012;
+constexpr double minAdsrSeconds = 0.0;
+constexpr double maxAdsrSeconds = 5.0;
 constexpr double maxLoopEndpointAdjustSeconds = 0.400;
 constexpr double loopEndpointSearchStepSeconds = 0.001;
 constexpr int sequenceOutputSmoothingSamples = 256;
@@ -36,6 +42,11 @@ float rampedSequenceOutputGain (float startGain, float endGain, int rampSamples,
 
     const auto t = (float) (sample + 1) / (float) rampSamples;
     return startGain + ((endGain - startGain) * t);
+}
+
+int envelopeSamplesForHost (double seconds, double sampleRate)
+{
+    return juce::jmax (0, (int) std::round (clampDouble (seconds, minAdsrSeconds, maxAdsrSeconds) * sampleRate));
 }
 }
 
@@ -225,7 +236,10 @@ void FronasmaskinenAudioProcessor::renderVoice (Voice& voice,
     const auto channels = output.getNumChannels();
     const auto sourceChannels = sampleBuffer.getNumChannels();
     const auto seamFade = slotFadeSamplesForSource (slot, loopLength);
-    const auto envelopeFadeSamples = slotFadeSamplesForHost (slot);
+    const auto attackSamples = envelopeSamplesForHost (slot.attackSeconds, hostSampleRate);
+    const auto decaySamples = envelopeSamplesForHost (slot.decaySeconds, hostSampleRate);
+    const auto releaseSamples = envelopeSamplesForHost (slot.releaseSeconds, hostSampleRate);
+    const auto sustain = juce::jlimit (0.0f, 1.0f, slot.sustainLevel);
     const auto gain = dbToGain (slot.gainDb) * voice.velocityGain;
     const auto sampleCount = (double) sampleBuffer.getNumSamples();
     const auto canUsePostRoll = end + (double) seamFade < sampleCount - 1.0;
@@ -235,23 +249,67 @@ void FronasmaskinenAudioProcessor::renderVoice (Voice& voice,
         if (! voice.active)
             break;
 
-        if (voice.attackSample < envelopeFadeSamples && ! voice.releasing)
+        if (! voice.releasing)
         {
-            voice.envelope = (float) voice.attackSample / (float) envelopeFadeSamples;
-            ++voice.attackSample;
-        }
-        else if (! voice.releasing)
-        {
-            voice.envelope = 1.0f;
+            if (voice.envelopeStage == EnvelopeStage::attack)
+            {
+                if (attackSamples <= 0)
+                {
+                    voice.envelope = 1.0f;
+                    voice.envelopeStage = EnvelopeStage::decay;
+                    voice.decaySample = 0;
+                }
+                else
+                {
+                    voice.envelope = (float) voice.attackSample / (float) attackSamples;
+                    ++voice.attackSample;
+
+                    if (voice.attackSample >= attackSamples)
+                    {
+                        voice.envelopeStage = EnvelopeStage::decay;
+                        voice.decaySample = 0;
+                    }
+                }
+            }
+
+            if (voice.envelopeStage == EnvelopeStage::decay)
+            {
+                if (decaySamples <= 0)
+                {
+                    voice.envelope = sustain;
+                    voice.envelopeStage = EnvelopeStage::sustain;
+                }
+                else
+                {
+                    const auto t = juce::jlimit (0.0f, 1.0f, (float) voice.decaySample / (float) decaySamples);
+                    voice.envelope = 1.0f + ((sustain - 1.0f) * t);
+                    ++voice.decaySample;
+
+                    if (voice.decaySample >= decaySamples)
+                    {
+                        voice.envelope = sustain;
+                        voice.envelopeStage = EnvelopeStage::sustain;
+                    }
+                }
+            }
+
+            if (voice.envelopeStage == EnvelopeStage::sustain)
+                voice.envelope = sustain;
         }
 
         if (voice.releasing)
         {
-            const auto t = (float) voice.releaseSample / (float) envelopeFadeSamples;
+            if (releaseSamples <= 0)
+            {
+                voice.active = false;
+                break;
+            }
+
+            const auto t = (float) voice.releaseSample / (float) releaseSamples;
             voice.envelope = voice.releaseStartEnvelope * juce::jlimit (0.0f, 1.0f, 1.0f - t);
             ++voice.releaseSample;
 
-            if (voice.releaseSample >= envelopeFadeSamples)
+            if (voice.releaseSample >= releaseSamples)
             {
                 voice.active = false;
                 break;
@@ -738,6 +796,10 @@ bool FronasmaskinenAudioProcessor::saveSelectionToSlot (int slotIndex)
     slot.endTrimSeconds = 0.0;
     slot.fadeSeconds = defaultFadeSeconds;
     slot.gainDb = 0.0f;
+    slot.attackSeconds = defaultAttackSeconds;
+    slot.decaySeconds = defaultDecaySeconds;
+    slot.sustainLevel = defaultSustainLevel;
+    slot.releaseSeconds = defaultReleaseSeconds;
     selectedSlot = slotIndex;
     activateLoopFromSelectedSlot();
     return true;
@@ -833,6 +895,25 @@ void FronasmaskinenAudioProcessor::setSelectedSlotGainDb (float gainDb)
         slot.gainDb = juce::jlimit (-24.0f, 6.0f, gainDb);
         activateLoopFromSelectedSlot();
     }
+}
+
+void FronasmaskinenAudioProcessor::setSelectedSlotAdsr (double attackSeconds,
+                                                        double decaySeconds,
+                                                        float sustainLevel,
+                                                        double releaseSeconds)
+{
+    const juce::ScopedLock lock (dataLock);
+    if (selectedSlot < 0 || selectedSlot >= slotCount)
+        return;
+
+    auto& slot = slots[(size_t) selectedSlot];
+    if (! slot.filled)
+        return;
+
+    slot.attackSeconds = clampDouble (attackSeconds, minAdsrSeconds, maxAdsrSeconds);
+    slot.decaySeconds = clampDouble (decaySeconds, minAdsrSeconds, maxAdsrSeconds);
+    slot.sustainLevel = juce::jlimit (0.0f, 1.0f, sustainLevel);
+    slot.releaseSeconds = clampDouble (releaseSeconds, minAdsrSeconds, maxAdsrSeconds);
 }
 
 int FronasmaskinenAudioProcessor::getSelectedSlotIndex() const
@@ -1072,6 +1153,10 @@ bool FronasmaskinenAudioProcessor::saveLoopToNextSlot (double startSeconds, doub
     slot.endTrimSeconds = 0.0;
     slot.fadeSeconds = defaultFadeSeconds;
     slot.gainDb = 0.0f;
+    slot.attackSeconds = defaultAttackSeconds;
+    slot.decaySeconds = defaultDecaySeconds;
+    slot.sustainLevel = defaultSustainLevel;
+    slot.releaseSeconds = defaultReleaseSeconds;
     selectedSlot = (int) std::distance (slots.begin(), nextSlot);
     selectionStartSeconds = bounds.first;
     selectionEndSeconds = bounds.second;
@@ -1145,6 +1230,10 @@ void FronasmaskinenAudioProcessor::getStateInformation (juce::MemoryBlock& destD
         child->setAttribute ("endTrim", slot.endTrimSeconds);
         child->setAttribute ("fade", slot.fadeSeconds);
         child->setAttribute ("gainDb", (double) slot.gainDb);
+        child->setAttribute ("attack", slot.attackSeconds);
+        child->setAttribute ("decay", slot.decaySeconds);
+        child->setAttribute ("sustain", (double) slot.sustainLevel);
+        child->setAttribute ("release", slot.releaseSeconds);
     }
 
     copyXmlToBinary (*root, destData);
@@ -1182,6 +1271,10 @@ void FronasmaskinenAudioProcessor::setStateInformation (const void* data, int si
         slot.endTrimSeconds = child->getDoubleAttribute ("endTrim", 0.0);
         slot.fadeSeconds = child->getDoubleAttribute ("fade", defaultFadeSeconds);
         slot.gainDb = (float) child->getDoubleAttribute ("gainDb", 0.0);
+        slot.attackSeconds = child->getDoubleAttribute ("attack", slot.fadeSeconds);
+        slot.decaySeconds = child->getDoubleAttribute ("decay", defaultDecaySeconds);
+        slot.sustainLevel = (float) child->getDoubleAttribute ("sustain", defaultSustainLevel);
+        slot.releaseSeconds = child->getDoubleAttribute ("release", slot.fadeSeconds);
     }
 
     if (selectedSlot >= 0 && selectedSlot < slotCount && slots[(size_t) selectedSlot].filled)

@@ -118,7 +118,7 @@ void WaveformComponent::drawMarker (juce::Graphics& g, double seconds, juce::Col
 FronasmaskinenAudioProcessorEditor::FronasmaskinenAudioProcessorEditor (FronasmaskinenAudioProcessor& p)
     : AudioProcessorEditor (&p), audioProcessor (p), waveform (p)
 {
-    setSize (760, 580);
+    setSize (760, 760);
     setWantsKeyboardFocus (true);
 
     titleLabel.setText ("Fronasmaskinen AU v0.1", juce::dontSendNotification);
@@ -141,15 +141,26 @@ FronasmaskinenAudioProcessorEditor::FronasmaskinenAudioProcessorEditor (Fronasma
     configureSlider (endTrimSlider, endTrimLabel, "End trim");
     configureSlider (fadeSlider, fadeLabel, "Fade");
     configureSlider (gainSlider, gainLabel, "Slot gain");
+    configureSlider (attackSlider, attackLabel, "Attack");
+    configureSlider (decaySlider, decayLabel, "Decay");
+    configureSlider (sustainSlider, sustainLabel, "Sustain");
+    configureSlider (releaseSlider, releaseLabel, "Release");
 
     startTrimSlider.setRange (-2.000, 2.000, 0.001);
     endTrimSlider.setRange (-2.000, 2.000, 0.001);
     fadeSlider.setRange (0.002, 0.080, 0.001);
     gainSlider.setRange (-24.0, 6.0, 0.1);
+    attackSlider.setRange (0.000, 5.000, 0.001);
+    decaySlider.setRange (0.000, 5.000, 0.001);
+    sustainSlider.setRange (0.000, 1.000, 0.01);
+    releaseSlider.setRange (0.000, 5.000, 0.001);
     startTrimSlider.setTextValueSuffix (" s");
     endTrimSlider.setTextValueSuffix (" s");
     fadeSlider.setTextValueSuffix (" s");
     gainSlider.setTextValueSuffix (" dB");
+    attackSlider.setTextValueSuffix (" s");
+    decaySlider.setTextValueSuffix (" s");
+    releaseSlider.setTextValueSuffix (" s");
 
     for (int i = 0; i < FronasmaskinenAudioProcessor::slotCount; ++i)
     {
@@ -213,7 +224,7 @@ void FronasmaskinenAudioProcessorEditor::resized()
 
     area.removeFromTop (6);
 
-    auto sliderArea = area.removeFromTop (172);
+    auto sliderArea = area.removeFromTop (340);
     auto layoutSlider = [&sliderArea] (juce::Label& label, juce::Slider& slider)
     {
         auto row = sliderArea.removeFromTop (42).reduced (0, 4);
@@ -225,6 +236,10 @@ void FronasmaskinenAudioProcessorEditor::resized()
     layoutSlider (endTrimLabel, endTrimSlider);
     layoutSlider (fadeLabel, fadeSlider);
     layoutSlider (gainLabel, gainSlider);
+    layoutSlider (attackLabel, attackSlider);
+    layoutSlider (decayLabel, decaySlider);
+    layoutSlider (sustainLabel, sustainSlider);
+    layoutSlider (releaseLabel, releaseSlider);
 }
 
 void FronasmaskinenAudioProcessorEditor::buttonClicked (juce::Button* button)
@@ -339,6 +354,16 @@ void FronasmaskinenAudioProcessorEditor::sliderValueChanged (juce::Slider* slide
     {
         audioProcessor.setSelectedSlotGainDb ((float) gainSlider.getValue());
         refreshFromProcessor();
+        return;
+    }
+
+    if (slider == &attackSlider || slider == &decaySlider || slider == &sustainSlider || slider == &releaseSlider)
+    {
+        audioProcessor.setSelectedSlotAdsr (attackSlider.getValue(),
+                                            decaySlider.getValue(),
+                                            (float) sustainSlider.getValue(),
+                                            releaseSlider.getValue());
+        refreshFromProcessor();
     }
 }
 
@@ -407,6 +432,10 @@ void FronasmaskinenAudioProcessorEditor::syncSelectedSlotControls()
     endTrimSlider.setEnabled (hasSelected);
     fadeSlider.setEnabled (hasSelected);
     gainSlider.setEnabled (hasSelected);
+    attackSlider.setEnabled (hasSelected);
+    decaySlider.setEnabled (hasSelected);
+    sustainSlider.setEnabled (hasSelected);
+    releaseSlider.setEnabled (hasSelected);
 
     if (! hasSelected)
     {
@@ -414,6 +443,10 @@ void FronasmaskinenAudioProcessorEditor::syncSelectedSlotControls()
         endTrimSlider.setValue (0.0, juce::dontSendNotification);
         fadeSlider.setValue (0.012, juce::dontSendNotification);
         gainSlider.setValue (0.0, juce::dontSendNotification);
+        attackSlider.setValue (0.012, juce::dontSendNotification);
+        decaySlider.setValue (0.0, juce::dontSendNotification);
+        sustainSlider.setValue (1.0, juce::dontSendNotification);
+        releaseSlider.setValue (0.012, juce::dontSendNotification);
         return;
     }
 
@@ -422,4 +455,8 @@ void FronasmaskinenAudioProcessorEditor::syncSelectedSlotControls()
     endTrimSlider.setValue (slot.endTrimSeconds, juce::dontSendNotification);
     fadeSlider.setValue (slot.fadeSeconds, juce::dontSendNotification);
     gainSlider.setValue (slot.gainDb, juce::dontSendNotification);
+    attackSlider.setValue (slot.attackSeconds, juce::dontSendNotification);
+    decaySlider.setValue (slot.decaySeconds, juce::dontSendNotification);
+    sustainSlider.setValue (slot.sustainLevel, juce::dontSendNotification);
+    releaseSlider.setValue (slot.releaseSeconds, juce::dontSendNotification);
 }
