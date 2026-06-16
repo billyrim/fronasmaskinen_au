@@ -773,6 +773,25 @@ double FronasmaskinenAudioProcessor::getPreviewLoopEndSeconds() const
     return preview.loopActive ? preview.loopEndSeconds : -1.0;
 }
 
+FronasmaskinenAudioProcessor::EditorSnapshot FronasmaskinenAudioProcessor::getEditorSnapshot() const
+{
+    const juce::ScopedLock lock (dataLock);
+
+    EditorSnapshot snapshot;
+    snapshot.hasSample = sampleBuffer.getNumSamples() > 0;
+    snapshot.previewPlaying = preview.playing && ! preview.releasing;
+    snapshot.previewLoopActive = preview.loopActive;
+    snapshot.pendingLoopStartActive = preview.pendingLoopStartActive;
+    snapshot.sampleDurationSeconds = sampleBufferRate > 0.0 ? (double) sampleBuffer.getNumSamples() / sampleBufferRate : 0.0;
+    snapshot.previewPositionSeconds = sampleBufferRate > 0.0 ? preview.positionSamples / sampleBufferRate : 0.0;
+    snapshot.pendingLoopStartSeconds = preview.pendingLoopStartActive ? preview.pendingLoopStartSeconds : -1.0;
+    snapshot.previewLoopStartSeconds = preview.loopActive ? preview.loopStartSeconds : -1.0;
+    snapshot.previewLoopEndSeconds = preview.loopActive ? preview.loopEndSeconds : -1.0;
+    snapshot.selectedSlot = selectedSlot;
+    snapshot.slots = slots;
+    return snapshot;
+}
+
 void FronasmaskinenAudioProcessor::getWaveformThumbnail (std::vector<float>& peaks) const
 {
     const juce::ScopedLock lock (dataLock);

@@ -31,6 +31,21 @@ public:
         double releaseSeconds = 0.012;
     };
 
+    struct EditorSnapshot
+    {
+        bool hasSample = false;
+        bool previewPlaying = false;
+        bool previewLoopActive = false;
+        bool pendingLoopStartActive = false;
+        double sampleDurationSeconds = 0.0;
+        double previewPositionSeconds = 0.0;
+        double pendingLoopStartSeconds = -1.0;
+        double previewLoopStartSeconds = -1.0;
+        double previewLoopEndSeconds = -1.0;
+        int selectedSlot = -1;
+        std::array<Slot, slotCount> slots {};
+    };
+
     FronasmaskinenAudioProcessor();
     ~FronasmaskinenAudioProcessor() override = default;
 
@@ -80,6 +95,7 @@ public:
     double getPendingLoopStartSeconds() const;
     double getPreviewLoopStartSeconds() const;
     double getPreviewLoopEndSeconds() const;
+    EditorSnapshot getEditorSnapshot() const;
     void getWaveformThumbnail (std::vector<float>& peaks) const;
 
     bool saveSelectionToSlot (int slotIndex);

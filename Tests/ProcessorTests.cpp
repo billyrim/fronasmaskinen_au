@@ -311,6 +311,26 @@ void seekAndSetLoopPoint (FronasmaskinenAudioProcessor& processor, double second
     expect (processor.setLoopPointAtPreviewPosition(), "Could not set loop point at " + juce::String (seconds, 3));
 }
 
+std::vector<juce::TextButton*> textButtonsIn (juce::Component& component)
+{
+    std::vector<juce::TextButton*> buttons;
+    for (int i = 0; i < component.getNumChildComponents(); ++i)
+        if (auto* button = dynamic_cast<juce::TextButton*> (component.getChildComponent (i)))
+            buttons.push_back (button);
+
+    return buttons;
+}
+
+std::vector<juce::Slider*> slidersIn (juce::Component& component)
+{
+    std::vector<juce::Slider*> sliders;
+    for (int i = 0; i < component.getNumChildComponents(); ++i)
+        if (auto* slider = dynamic_cast<juce::Slider*> (component.getChildComponent (i)))
+            sliders.push_back (slider);
+
+    return sliders;
+}
+
 void testSampleLoadingAndWaveform()
 {
     auto processor = FronasmaskinenAudioProcessor();
@@ -327,6 +347,45 @@ void testSampleLoadingAndWaveform()
     expect (peaks.size() == 2048, "Waveform thumbnail should be built after loading");
     expect (std::any_of (peaks.begin(), peaks.end(), [] (float value) { return value > 0.1f; }),
             "Waveform thumbnail should contain non-silent peaks");
+
+    sample.deleteFile();
+}
+
+void testEditorSnapshotReflectsPlaybackAndSlotState()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createTestSample();
+    expect (processor.loadAudioFile (sample), "Sample should load for editor snapshot test");
+
+    auto snapshot = processor.getEditorSnapshot();
+    expect (snapshot.hasSample, "Editor snapshot should report loaded sample");
+    expect (! snapshot.previewPlaying, "Editor snapshot should report stopped preview before play");
+    expect (! snapshot.previewLoopActive, "Editor snapshot should report no active loop before slot save");
+    expect (snapshot.selectedSlot == -1, "Editor snapshot should report no selected slot before slot save");
+    expectNear (snapshot.sampleDurationSeconds, 1.0, epsilon, "Editor snapshot should include sample duration");
+
+    processor.setSelection (0.10, 0.20);
+    expect (processor.saveSelectionToSlot (0), "Should save S1 for editor snapshot test");
+    processor.setSelectedSlotFadeSeconds (0.033);
+    processor.setSelectedSlotGainDb (-6.0f);
+    processor.setSelectedSlotAdsr (0.020, 0.030, 0.50f, 0.040);
+    processor.playPreview();
+    processor.seekPreview (0.14);
+
+    snapshot = processor.getEditorSnapshot();
+    expect (snapshot.previewPlaying, "Editor snapshot should report playing preview");
+    expect (snapshot.previewLoopActive, "Editor snapshot should report active slot loop");
+    expect (snapshot.selectedSlot == 0, "Editor snapshot should carry selected slot");
+    expectNear (snapshot.previewPositionSeconds, 0.14, epsilon, "Editor snapshot should carry preview position");
+    expectNear (snapshot.previewLoopStartSeconds, 0.10, epsilon, "Editor snapshot should carry loop start");
+    expectNear (snapshot.previewLoopEndSeconds, 0.20, epsilon, "Editor snapshot should carry loop end");
+    expect (snapshot.slots[0].filled, "Editor snapshot should include filled slot state");
+    expectNear (snapshot.slots[0].fadeSeconds, 0.033, epsilon, "Editor snapshot should include slot fade");
+    expectNear (snapshot.slots[0].gainDb, -6.0, epsilon, "Editor snapshot should include slot gain");
+    expectNear (snapshot.slots[0].attackSeconds, 0.020, epsilon, "Editor snapshot should include slot attack");
+    expectNear (snapshot.slots[0].decaySeconds, 0.030, epsilon, "Editor snapshot should include slot decay");
+    expectNear (snapshot.slots[0].sustainLevel, 0.50, epsilon, "Editor snapshot should include slot sustain");
+    expectNear (snapshot.slots[0].releaseSeconds, 0.040, epsilon, "Editor snapshot should include slot release");
 
     sample.deleteFile();
 }
@@ -1083,6 +1142,80 @@ void testWaveformFileDragAndDropLoadsSample()
     sample.deleteFile();
 }
 
+void testSlotStripRefreshesAndDispatchesCallbacks()
+{
+    FronasmaskinenAudioProcessor::EditorSnapshot snapshot;
+    snapshot.selectedSlot = 0;
+    snapshot.slots[0].filled = true;
+    snapshot.slots[0].baseStartSeconds = 0.10;
+    snapshot.slots[0].baseEndSeconds = 0.20;
+    snapshot.slots[1].filled = true;
+    snapshot.slots[1].baseStartSeconds = 0.30;
+    snapshot.slots[1].baseEndSeconds = 0.40;
+
+    auto slotStrip = SlotStripComponent();
+    slotStrip.setBounds (0, 0, 760, 90);
+    slotStrip.refresh (snapshot);
+
+    auto buttons = textButtonsIn (slotStrip);
+    expect (buttons.size() == (size_t) FronasmaskinenAudioProcessor::slotCount * 4,
+            "Slot strip should expose slot, move, and clear buttons for each slot");
+    expect (buttons[0]->getButtonText().contains ("S1"), "Slot strip should label S1");
+    expect (buttons[0]->getButtonText().contains ("0.100s"), "Slot strip should show S1 start time");
+    expect (! buttons[1]->isEnabled(), "S1 move-left should be disabled at the left edge");
+    expect (buttons[2]->isEnabled(), "S1 move-right should be enabled when S2 is filled");
+    expect (buttons[3]->isEnabled(), "S1 clear should be enabled when S1 is filled");
+    expect (buttons[4]->getButtonText().contains ("S2"), "Slot strip should label S2");
+    expect (buttons[5]->isEnabled(), "S2 move-left should be enabled when S1 is filled");
+    expect (! buttons[6]->isEnabled(), "S2 move-right should be disabled when S3 is empty");
+
+    int selected = -1;
+    int movedLeft = -1;
+    int movedRight = -1;
+    int cleared = -1;
+    slotStrip.onSlotClicked = [&selected] (int slotIndex) { selected = slotIndex; };
+    slotStrip.onMoveLeftClicked = [&movedLeft] (int slotIndex) { movedLeft = slotIndex; };
+    slotStrip.onMoveRightClicked = [&movedRight] (int slotIndex) { movedRight = slotIndex; };
+    slotStrip.onClearClicked = [&cleared] (int slotIndex) { cleared = slotIndex; };
+
+    slotStrip.triggerSlotClick (0);
+    slotStrip.triggerMoveRightClick (0);
+    slotStrip.triggerMoveLeftClick (1);
+    slotStrip.triggerClearClick (0);
+    expect (selected == 0, "Slot strip should dispatch S1 click");
+    expect (movedRight == 0, "Slot strip should dispatch S1 move-right click");
+    expect (movedLeft == 1, "Slot strip should dispatch S2 move-left click");
+    expect (cleared == 0, "Slot strip should dispatch S1 clear click");
+}
+
+void testEditorCreatesRotarySlotControls()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    auto editor = std::unique_ptr<juce::AudioProcessorEditor> (processor.createEditor());
+
+    auto sliders = slidersIn (*editor);
+    const auto rotaryCount = (int) std::count_if (sliders.begin(), sliders.end(), [] (const juce::Slider* slider)
+    {
+        return slider->getSliderStyle() == juce::Slider::RotaryHorizontalVerticalDrag;
+    });
+
+    expect (rotaryCount == 2, "Editor should create rotary controls for Fade and Slot gain");
+    expect (std::any_of (sliders.begin(), sliders.end(), [] (const juce::Slider* slider)
+            {
+                return std::abs (slider->getRange().getStart() - 0.002) < epsilon
+                    && std::abs (slider->getRange().getEnd() - 0.080) < epsilon
+                    && slider->getSliderStyle() == juce::Slider::RotaryHorizontalVerticalDrag;
+            }),
+            "Editor should keep Fade as a rotary control with the processor fade range");
+    expect (std::any_of (sliders.begin(), sliders.end(), [] (const juce::Slider* slider)
+            {
+                return std::abs (slider->getRange().getStart() - -24.0) < epsilon
+                    && std::abs (slider->getRange().getEnd() - 6.0) < epsilon
+                    && slider->getSliderStyle() == juce::Slider::RotaryHorizontalVerticalDrag;
+            }),
+            "Editor should keep Slot gain as a rotary control with the processor gain range");
+}
+
 void testSlotMoveSwapsFilledSlots()
 {
     auto processor = FronasmaskinenAudioProcessor();
@@ -1158,6 +1291,7 @@ int main()
     try
     {
         runTest ("sample loading and waveform thumbnail", testSampleLoadingAndWaveform);
+        runTest ("editor snapshot reflects playback and slot state", testEditorSnapshotReflectsPlaybackAndSlotState);
         runTest ("loading new sample resets microloop state", testLoadingNewSampleResetsMicroloopState);
         runTest ("selection and preview seek clamp to sample bounds", testSelectionAndPreviewSeekClampToSampleBounds);
         runTest ("preview seek, play, and loop slot creation", testPreviewSeekPlayAndLoopSlotCreation);
@@ -1184,6 +1318,8 @@ int main()
         runTest ("slot gain affects preview loop level", testSlotGainAffectsPreviewLoopLevel);
         runTest ("stereo sample preview preserves channel independence", testStereoSamplePreviewPreservesChannelIndependence);
         runTest ("waveform file drag and drop loads sample", testWaveformFileDragAndDropLoadsSample);
+        runTest ("slot strip refreshes and dispatches callbacks", testSlotStripRefreshesAndDispatchesCallbacks);
+        runTest ("editor creates rotary slot controls", testEditorCreatesRotarySlotControls);
         runTest ("slot move swaps filled slots", testSlotMoveSwapsFilledSlots);
         runTest ("slot move rejects edges and empty targets", testSlotMoveRejectsEdgesAndEmptyTargets);
     }

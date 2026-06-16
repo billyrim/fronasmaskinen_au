@@ -7,6 +7,149 @@ bool isSupportedAudioFile (const juce::File& file)
     const auto extension = file.getFileExtension().toLowerCase();
     return file.existsAsFile() && (extension == ".wav" || extension == ".aif" || extension == ".aiff");
 }
+
+juce::String describeSlot (const FronasmaskinenAudioProcessor::Slot& slot)
+{
+    if (! slot.filled)
+        return "empty";
+
+    return juce::String (slot.baseStartSeconds, 3) + "s - " + juce::String (slot.baseEndSeconds, 3) + "s";
+}
+
+juce::Path buildAdsrPath (juce::Rectangle<float> bounds, double attack, double decay, float sustain, double release)
+{
+    const auto total = juce::jmax (0.20, attack + decay + release + 0.20);
+    const auto sustainHold = juce::jmax (0.16, total * 0.28);
+    const auto drawTotal = attack + decay + sustainHold + release;
+    const auto bottom = bounds.getBottom();
+    const auto top = bounds.getY();
+    const auto levelY = [&bounds, bottom] (float level)
+    {
+        return bottom - (juce::jlimit (0.0f, 1.0f, level) * bounds.getHeight());
+    };
+    const auto xFor = [&bounds, drawTotal] (double seconds)
+    {
+        return bounds.getX() + (float) (seconds / drawTotal) * bounds.getWidth();
+    };
+
+    const auto attackEnd = attack;
+    const auto decayEnd = attack + decay;
+    const auto sustainEnd = decayEnd + sustainHold;
+    const auto releaseEnd = sustainEnd + release;
+
+    juce::Path path;
+    path.startNewSubPath (bounds.getX(), bottom);
+    path.lineTo (xFor (attackEnd), top);
+    path.lineTo (xFor (decayEnd), levelY (sustain));
+    path.lineTo (xFor (sustainEnd), levelY (sustain));
+    path.lineTo (xFor (releaseEnd), bottom);
+    return path;
+}
+}
+
+FronasLookAndFeel::FronasLookAndFeel()
+{
+    setColour (juce::Slider::thumbColourId, juce::Colour::fromRGB (73, 172, 209));
+    setColour (juce::Slider::trackColourId, juce::Colour::fromRGB (33, 59, 66));
+    setColour (juce::Slider::rotarySliderFillColourId, juce::Colour::fromRGB (80, 178, 157));
+    setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromRGB (42, 52, 57));
+    setColour (juce::TextButton::buttonColourId, juce::Colour::fromRGB (36, 47, 54));
+    setColour (juce::TextButton::buttonOnColourId, juce::Colour::fromRGB (54, 116, 104));
+}
+
+void FronasLookAndFeel::drawButtonBackground (juce::Graphics& g,
+                                              juce::Button& button,
+                                              const juce::Colour& backgroundColour,
+                                              bool shouldDrawButtonAsHighlighted,
+                                              bool shouldDrawButtonAsDown)
+{
+    auto bounds = button.getLocalBounds().toFloat().reduced (0.5f);
+    auto colour = backgroundColour;
+
+    if (! button.isEnabled())
+        colour = juce::Colour::fromRGB (31, 37, 41);
+    else if (shouldDrawButtonAsDown)
+        colour = colour.brighter (0.18f);
+    else if (shouldDrawButtonAsHighlighted)
+        colour = colour.brighter (0.08f);
+
+    g.setColour (colour);
+    g.fillRoundedRectangle (bounds, 6.0f);
+
+    g.setColour (button.isEnabled() ? juce::Colour::fromRGB (137, 158, 164)
+                                    : juce::Colour::fromRGB (76, 86, 90));
+    g.drawRoundedRectangle (bounds, 6.0f, 1.0f);
+}
+
+void FronasLookAndFeel::drawRotarySlider (juce::Graphics& g,
+                                          int x,
+                                          int y,
+                                          int width,
+                                          int height,
+                                          float sliderPosProportional,
+                                          float rotaryStartAngle,
+                                          float rotaryEndAngle,
+                                          juce::Slider& slider)
+{
+    const auto bounds = juce::Rectangle<float> ((float) x, (float) y, (float) width, (float) height).reduced (7.0f);
+    const auto radius = juce::jmin (bounds.getWidth(), bounds.getHeight()) * 0.5f;
+    const auto centre = bounds.getCentre();
+    const auto angle = rotaryStartAngle + sliderPosProportional * (rotaryEndAngle - rotaryStartAngle);
+    const auto arcRadius = radius - 6.0f;
+    const auto lineWidth = juce::jmax (2.0f, radius * 0.12f);
+
+    juce::Path backgroundArc;
+    backgroundArc.addCentredArc (centre.x, centre.y, arcRadius, arcRadius, 0.0f, rotaryStartAngle, rotaryEndAngle, true);
+    g.setColour (slider.findColour (juce::Slider::rotarySliderOutlineColourId));
+    g.strokePath (backgroundArc, juce::PathStrokeType (lineWidth, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+    juce::Path valueArc;
+    valueArc.addCentredArc (centre.x, centre.y, arcRadius, arcRadius, 0.0f, rotaryStartAngle, angle, true);
+    g.setColour (slider.findColour (juce::Slider::rotarySliderFillColourId));
+    g.strokePath (valueArc, juce::PathStrokeType (lineWidth, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+    g.setColour (juce::Colour::fromRGB (21, 27, 30));
+    g.fillEllipse (centre.x - radius * 0.62f, centre.y - radius * 0.62f, radius * 1.24f, radius * 1.24f);
+
+    g.setColour (juce::Colour::fromRGB (83, 99, 105));
+    g.drawEllipse (centre.x - radius * 0.62f, centre.y - radius * 0.62f, radius * 1.24f, radius * 1.24f, 1.0f);
+
+    juce::Path pointer;
+    pointer.addRoundedRectangle (-2.0f, -radius * 0.52f, 4.0f, radius * 0.34f, 2.0f);
+    pointer.applyTransform (juce::AffineTransform::rotation (angle).translated (centre.x, centre.y));
+    g.setColour (juce::Colour::fromRGB (232, 228, 210));
+    g.fillPath (pointer);
+}
+
+void FronasLookAndFeel::drawLinearSlider (juce::Graphics& g,
+                                          int x,
+                                          int y,
+                                          int width,
+                                          int height,
+                                          float sliderPos,
+                                          float minSliderPos,
+                                          float maxSliderPos,
+                                          const juce::Slider::SliderStyle style,
+                                          juce::Slider& slider)
+{
+    if (style != juce::Slider::LinearHorizontal)
+    {
+        LookAndFeel_V4::drawLinearSlider (g, x, y, width, height, sliderPos, minSliderPos, maxSliderPos, style, slider);
+        return;
+    }
+
+    juce::ignoreUnused (minSliderPos, maxSliderPos);
+    auto bounds = juce::Rectangle<float> ((float) x, (float) y, (float) width, (float) height);
+    auto track = bounds.withHeight (6.0f).withCentre (bounds.getCentre());
+
+    g.setColour (juce::Colour::fromRGB (20, 30, 34));
+    g.fillRoundedRectangle (track, 3.0f);
+
+    g.setColour (slider.findColour (juce::Slider::trackColourId));
+    g.fillRoundedRectangle (track.withRight (sliderPos), 3.0f);
+
+    g.setColour (slider.findColour (juce::Slider::thumbColourId));
+    g.fillEllipse (sliderPos - 6.0f, bounds.getCentreY() - 6.0f, 12.0f, 12.0f);
 }
 
 WaveformComponent::WaveformComponent (FronasmaskinenAudioProcessor& processorToUse)
@@ -115,53 +258,8 @@ void WaveformComponent::drawMarker (juce::Graphics& g, double seconds, juce::Col
     g.drawLine (x, 0.0f, x, (float) getHeight(), thickness);
 }
 
-FronasmaskinenAudioProcessorEditor::FronasmaskinenAudioProcessorEditor (FronasmaskinenAudioProcessor& p)
-    : AudioProcessorEditor (&p), audioProcessor (p), waveform (p)
+SlotStripComponent::SlotStripComponent()
 {
-    setSize (760, 760);
-    setWantsKeyboardFocus (true);
-
-    titleLabel.setText ("Fronasmaskinen AU v0.1", juce::dontSendNotification);
-    titleLabel.setFont (juce::FontOptions (24.0f, juce::Font::bold));
-    addAndMakeVisible (titleLabel);
-
-    addAndMakeVisible (loadButton);
-    loadButton.setEnabled (true);
-    loadButton.addListener (this);
-    addAndMakeVisible (playButton);
-    addAndMakeVisible (loopPointButton);
-    addAndMakeVisible (releaseButton);
-    addAndMakeVisible (randomButton);
-    addAndMakeVisible (waveform);
-
-    for (auto* button : { &playButton, &loopPointButton, &releaseButton, &randomButton })
-        button->addListener (this);
-
-    configureSlider (startTrimSlider, startTrimLabel, "Start trim");
-    configureSlider (endTrimSlider, endTrimLabel, "End trim");
-    configureSlider (fadeSlider, fadeLabel, "Fade");
-    configureSlider (gainSlider, gainLabel, "Slot gain");
-    configureSlider (attackSlider, attackLabel, "Attack");
-    configureSlider (decaySlider, decayLabel, "Decay");
-    configureSlider (sustainSlider, sustainLabel, "Sustain");
-    configureSlider (releaseSlider, releaseLabel, "Release");
-
-    startTrimSlider.setRange (-2.000, 2.000, 0.001);
-    endTrimSlider.setRange (-2.000, 2.000, 0.001);
-    fadeSlider.setRange (0.002, 0.080, 0.001);
-    gainSlider.setRange (-24.0, 6.0, 0.1);
-    attackSlider.setRange (0.000, 5.000, 0.001);
-    decaySlider.setRange (0.000, 5.000, 0.001);
-    sustainSlider.setRange (0.000, 1.000, 0.01);
-    releaseSlider.setRange (0.000, 5.000, 0.001);
-    startTrimSlider.setTextValueSuffix (" s");
-    endTrimSlider.setTextValueSuffix (" s");
-    fadeSlider.setTextValueSuffix (" s");
-    gainSlider.setTextValueSuffix (" dB");
-    attackSlider.setTextValueSuffix (" s");
-    decaySlider.setTextValueSuffix (" s");
-    releaseSlider.setTextValueSuffix (" s");
-
     for (int i = 0; i < FronasmaskinenAudioProcessor::slotCount; ++i)
     {
         slotButtons[(size_t) i].setButtonText ("S" + juce::String (i + 1));
@@ -180,9 +278,227 @@ FronasmaskinenAudioProcessorEditor::FronasmaskinenAudioProcessorEditor (Fronasma
         clearButtons[(size_t) i].addListener (this);
         addAndMakeVisible (clearButtons[(size_t) i]);
     }
+}
+
+SlotStripComponent::~SlotStripComponent()
+{
+    for (int i = 0; i < FronasmaskinenAudioProcessor::slotCount; ++i)
+    {
+        slotButtons[(size_t) i].removeListener (this);
+        moveLeftButtons[(size_t) i].removeListener (this);
+        moveRightButtons[(size_t) i].removeListener (this);
+        clearButtons[(size_t) i].removeListener (this);
+    }
+}
+
+void SlotStripComponent::resized()
+{
+    auto area = getLocalBounds();
+    const auto slotWidth = area.getWidth() / FronasmaskinenAudioProcessor::slotCount;
+
+    for (int i = 0; i < FronasmaskinenAudioProcessor::slotCount; ++i)
+    {
+        auto cell = area.removeFromLeft (slotWidth).reduced (4);
+        auto moveRow = cell.removeFromTop (20);
+        moveLeftButtons[(size_t) i].setBounds (moveRow.removeFromLeft (24));
+        moveRightButtons[(size_t) i].setBounds (moveRow.removeFromLeft (24).reduced (2, 0));
+        slotButtons[(size_t) i].setBounds (cell.removeFromTop (42));
+        clearButtons[(size_t) i].setBounds (cell.removeFromTop (22).reduced (10, 0));
+    }
+}
+
+void SlotStripComponent::refresh (const FronasmaskinenAudioProcessor::EditorSnapshot& snapshot)
+{
+    for (int i = 0; i < FronasmaskinenAudioProcessor::slotCount; ++i)
+    {
+        const auto& slot = snapshot.slots[(size_t) i];
+        const auto text = "S" + juce::String (i + 1) + "\n" + describeSlot (slot);
+        slotButtons[(size_t) i].setButtonText (text);
+        slotButtons[(size_t) i].setColour (juce::TextButton::buttonColourId,
+                                           snapshot.selectedSlot == i ? juce::Colour::fromRGB (54, 116, 104)
+                                                                      : juce::Colour::fromRGB (36, 47, 54));
+        moveLeftButtons[(size_t) i].setEnabled (slot.filled && i > 0 && snapshot.slots[(size_t) (i - 1)].filled);
+        moveRightButtons[(size_t) i].setEnabled (slot.filled && i < FronasmaskinenAudioProcessor::slotCount - 1
+                                                 && snapshot.slots[(size_t) (i + 1)].filled);
+        clearButtons[(size_t) i].setEnabled (slot.filled);
+    }
+}
+
+void SlotStripComponent::triggerSlotClick (int slotIndex)
+{
+    if (onSlotClicked)
+        onSlotClicked (slotIndex);
+}
+
+void SlotStripComponent::triggerMoveLeftClick (int slotIndex)
+{
+    if (onMoveLeftClicked)
+        onMoveLeftClicked (slotIndex);
+}
+
+void SlotStripComponent::triggerMoveRightClick (int slotIndex)
+{
+    if (onMoveRightClicked)
+        onMoveRightClicked (slotIndex);
+}
+
+void SlotStripComponent::triggerClearClick (int slotIndex)
+{
+    if (onClearClicked)
+        onClearClicked (slotIndex);
+}
+
+void SlotStripComponent::buttonClicked (juce::Button* button)
+{
+    for (int i = 0; i < FronasmaskinenAudioProcessor::slotCount; ++i)
+    {
+        if (button == &slotButtons[(size_t) i])
+        {
+            triggerSlotClick (i);
+            return;
+        }
+
+        if (button == &moveLeftButtons[(size_t) i])
+        {
+            triggerMoveLeftClick (i);
+            return;
+        }
+
+        if (button == &moveRightButtons[(size_t) i])
+        {
+            triggerMoveRightClick (i);
+            return;
+        }
+
+        if (button == &clearButtons[(size_t) i])
+        {
+            triggerClearClick (i);
+            return;
+        }
+    }
+}
+
+void AdsrDisplayComponent::setAdsr (double attackSeconds, double decaySeconds, float sustainLevel, double releaseSeconds, bool enabled)
+{
+    attack = attackSeconds;
+    decay = decaySeconds;
+    sustain = sustainLevel;
+    release = releaseSeconds;
+    active = enabled;
+    repaint();
+}
+
+void AdsrDisplayComponent::paint (juce::Graphics& g)
+{
+    auto bounds = getLocalBounds().toFloat();
+    g.setColour (juce::Colour::fromRGB (18, 25, 28));
+    g.fillRoundedRectangle (bounds, 6.0f);
+    g.setColour (juce::Colour::fromRGB (63, 78, 84));
+    g.drawRoundedRectangle (bounds.reduced (0.5f), 6.0f, 1.0f);
+
+    auto graph = bounds.reduced (14.0f, 12.0f);
+    g.setColour (juce::Colour::fromRGBA (98, 116, 120, 90));
+    for (int i = 1; i < 4; ++i)
+    {
+        const auto y = graph.getY() + graph.getHeight() * (float) i / 4.0f;
+        g.drawHorizontalLine ((int) y, graph.getX(), graph.getRight());
+    }
+
+    auto path = buildAdsrPath (graph, attack, decay, sustain, release);
+    g.setColour (active ? juce::Colour::fromRGB (98, 202, 177)
+                        : juce::Colour::fromRGB (86, 100, 104));
+    g.strokePath (path, juce::PathStrokeType (2.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+    g.setColour (active ? juce::Colour::fromRGBA (98, 202, 177, 36)
+                        : juce::Colour::fromRGBA (86, 100, 104, 22));
+    path.lineTo (graph.getRight(), graph.getBottom());
+    path.lineTo (graph.getX(), graph.getBottom());
+    path.closeSubPath();
+    g.fillPath (path);
+}
+
+FronasmaskinenAudioProcessorEditor::FronasmaskinenAudioProcessorEditor (FronasmaskinenAudioProcessor& p)
+    : AudioProcessorEditor (&p), audioProcessor (p), waveform (p)
+{
+    setLookAndFeel (&lookAndFeel);
+    setSize (820, 760);
+    setWantsKeyboardFocus (true);
+
+    titleLabel.setText ("Fronasmaskinen AU v0.1", juce::dontSendNotification);
+    titleLabel.setFont (juce::FontOptions (24.0f, juce::Font::bold));
+    addAndMakeVisible (titleLabel);
+
+    addAndMakeVisible (loadButton);
+    loadButton.setEnabled (true);
+    loadButton.addListener (this);
+    addAndMakeVisible (playButton);
+    addAndMakeVisible (loopPointButton);
+    addAndMakeVisible (releaseButton);
+    addAndMakeVisible (randomButton);
+    addAndMakeVisible (waveform);
+    addAndMakeVisible (slotStrip);
+    addAndMakeVisible (adsrDisplay);
+
+    for (auto* button : { &playButton, &loopPointButton, &releaseButton, &randomButton })
+        button->addListener (this);
+
+    slotStrip.onSlotClicked = [this] (int slotIndex)
+    {
+        if (! audioProcessor.selectSlot (slotIndex))
+            audioProcessor.saveSelectionToSlot (slotIndex);
+
+        refreshFromProcessor();
+    };
+    slotStrip.onMoveLeftClicked = [this] (int slotIndex)
+    {
+        audioProcessor.moveSlotLeft (slotIndex);
+        refreshFromProcessor();
+    };
+    slotStrip.onMoveRightClicked = [this] (int slotIndex)
+    {
+        audioProcessor.moveSlotRight (slotIndex);
+        refreshFromProcessor();
+    };
+    slotStrip.onClearClicked = [this] (int slotIndex)
+    {
+        audioProcessor.clearSlot (slotIndex);
+        refreshFromProcessor();
+    };
+
+    configureSlider (startTrimSlider, startTrimLabel, "Start trim");
+    configureSlider (endTrimSlider, endTrimLabel, "End trim");
+    configureSlider (fadeSlider, fadeLabel, "Fade");
+    configureSlider (gainSlider, gainLabel, "Slot gain");
+    configureSlider (attackSlider, attackLabel, "Attack");
+    configureSlider (decaySlider, decayLabel, "Decay");
+    configureSlider (sustainSlider, sustainLabel, "Sustain");
+    configureSlider (releaseSlider, releaseLabel, "Release");
+
+    startTrimSlider.setRange (-2.000, 2.000, 0.001);
+    endTrimSlider.setRange (-2.000, 2.000, 0.001);
+    fadeSlider.setRange (0.002, 0.080, 0.001);
+    gainSlider.setRange (-24.0, 6.0, 0.1);
+    attackSlider.setRange (0.000, 5.000, 0.001);
+    decaySlider.setRange (0.000, 5.000, 0.001);
+    sustainSlider.setRange (0.000, 1.000, 0.01);
+    releaseSlider.setRange (0.000, 5.000, 0.001);
+    configureKnob (fadeSlider);
+    configureKnob (gainSlider);
+    startTrimSlider.setTextValueSuffix (" s");
+    endTrimSlider.setTextValueSuffix (" s");
+    fadeSlider.setTextValueSuffix (" s");
+    gainSlider.setTextValueSuffix (" dB");
+    attackSlider.setTextValueSuffix (" s");
+    decaySlider.setTextValueSuffix (" s");
+    releaseSlider.setTextValueSuffix (" s");
 
     refreshFromProcessor();
     startTimerHz (12);
+}
+
+FronasmaskinenAudioProcessorEditor::~FronasmaskinenAudioProcessorEditor()
+{
+    setLookAndFeel (nullptr);
 }
 
 void FronasmaskinenAudioProcessorEditor::paint (juce::Graphics& g)
@@ -202,18 +518,7 @@ void FronasmaskinenAudioProcessorEditor::resized()
     waveform.setBounds (area.removeFromTop (150).reduced (0, 4));
 
     area.removeFromTop (8);
-    const auto slotWidth = area.getWidth() / FronasmaskinenAudioProcessor::slotCount;
-    auto slotRow = area.removeFromTop (86);
-
-    for (int i = 0; i < FronasmaskinenAudioProcessor::slotCount; ++i)
-    {
-        auto cell = slotRow.removeFromLeft (slotWidth).reduced (4);
-        auto moveRow = cell.removeFromTop (20);
-        moveLeftButtons[(size_t) i].setBounds (moveRow.removeFromLeft (24));
-        moveRightButtons[(size_t) i].setBounds (moveRow.removeFromLeft (24).reduced (2, 0));
-        slotButtons[(size_t) i].setBounds (cell.removeFromTop (40));
-        clearButtons[(size_t) i].setBounds (cell.removeFromTop (22).reduced (10, 0));
-    }
+    slotStrip.setBounds (area.removeFromTop (90));
 
     auto transport = area.removeFromTop (42).reduced (0, 4);
     playButton.setBounds (transport.removeFromLeft (96).reduced (0, 2));
@@ -224,22 +529,35 @@ void FronasmaskinenAudioProcessorEditor::resized()
 
     area.removeFromTop (6);
 
-    auto sliderArea = area.removeFromTop (340);
-    auto layoutSlider = [&sliderArea] (juce::Label& label, juce::Slider& slider)
+    auto controlsArea = area.removeFromTop (350);
+    auto trimArea = controlsArea.removeFromLeft (330);
+    auto knobArea = controlsArea.removeFromLeft (190).reduced (10, 0);
+    auto adsrArea = controlsArea.reduced (10, 0);
+
+    auto layoutSlider = [] (juce::Rectangle<int>& sliderArea, juce::Label& label, juce::Slider& slider)
     {
         auto row = sliderArea.removeFromTop (42).reduced (0, 4);
         label.setBounds (row.removeFromLeft (90));
         slider.setBounds (row);
     };
 
-    layoutSlider (startTrimLabel, startTrimSlider);
-    layoutSlider (endTrimLabel, endTrimSlider);
-    layoutSlider (fadeLabel, fadeSlider);
-    layoutSlider (gainLabel, gainSlider);
-    layoutSlider (attackLabel, attackSlider);
-    layoutSlider (decayLabel, decaySlider);
-    layoutSlider (sustainLabel, sustainSlider);
-    layoutSlider (releaseLabel, releaseSlider);
+    layoutSlider (trimArea, startTrimLabel, startTrimSlider);
+    layoutSlider (trimArea, endTrimLabel, endTrimSlider);
+
+    auto fadeKnob = knobArea.removeFromTop (160);
+    fadeLabel.setBounds (fadeKnob.removeFromTop (24));
+    fadeSlider.setBounds (fadeKnob.reduced (12, 0));
+
+    auto gainKnob = knobArea.removeFromTop (160);
+    gainLabel.setBounds (gainKnob.removeFromTop (24));
+    gainSlider.setBounds (gainKnob.reduced (12, 0));
+
+    adsrDisplay.setBounds (adsrArea.removeFromTop (120).reduced (0, 4));
+    adsrArea.removeFromTop (8);
+    layoutSlider (adsrArea, attackLabel, attackSlider);
+    layoutSlider (adsrArea, decayLabel, decaySlider);
+    layoutSlider (adsrArea, sustainLabel, sustainSlider);
+    layoutSlider (adsrArea, releaseLabel, releaseSlider);
 }
 
 void FronasmaskinenAudioProcessorEditor::buttonClicked (juce::Button* button)
@@ -288,38 +606,6 @@ void FronasmaskinenAudioProcessorEditor::buttonClicked (juce::Button* button)
         return;
     }
 
-    for (int i = 0; i < FronasmaskinenAudioProcessor::slotCount; ++i)
-    {
-        if (button == &slotButtons[(size_t) i])
-        {
-            if (! audioProcessor.selectSlot (i))
-                audioProcessor.saveSelectionToSlot (i);
-
-            refreshFromProcessor();
-            return;
-        }
-
-        if (button == &moveLeftButtons[(size_t) i])
-        {
-            audioProcessor.moveSlotLeft (i);
-            refreshFromProcessor();
-            return;
-        }
-
-        if (button == &moveRightButtons[(size_t) i])
-        {
-            audioProcessor.moveSlotRight (i);
-            refreshFromProcessor();
-            return;
-        }
-
-        if (button == &clearButtons[(size_t) i])
-        {
-            audioProcessor.clearSlot (i);
-            refreshFromProcessor();
-            return;
-        }
-    }
 }
 
 bool FronasmaskinenAudioProcessorEditor::keyPressed (const juce::KeyPress& key)
@@ -369,8 +655,16 @@ void FronasmaskinenAudioProcessorEditor::sliderValueChanged (juce::Slider* slide
 
 void FronasmaskinenAudioProcessorEditor::timerCallback()
 {
+    const auto snapshot = audioProcessor.getEditorSnapshot();
     waveform.repaint();
-    refreshFromProcessor();
+    refreshPlaybackState (snapshot);
+
+    if (snapshot.selectedSlot != controlsSyncedToSelectedSlot)
+    {
+        syncSelectedSlotControls (snapshot);
+        refreshSlotButtons (snapshot);
+        controlsSyncedToSelectedSlot = snapshot.selectedSlot;
+    }
 }
 
 void FronasmaskinenAudioProcessorEditor::configureSlider (juce::Slider& slider, juce::Label& label, const juce::String& text)
@@ -385,47 +679,44 @@ void FronasmaskinenAudioProcessorEditor::configureSlider (juce::Slider& slider, 
     addAndMakeVisible (slider);
 }
 
+void FronasmaskinenAudioProcessorEditor::configureKnob (juce::Slider& slider)
+{
+    slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+    slider.setRotaryParameters (juce::MathConstants<float>::pi * 1.18f,
+                                juce::MathConstants<float>::pi * 2.82f,
+                                true);
+    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 88, 22);
+}
+
 void FronasmaskinenAudioProcessorEditor::refreshFromProcessor()
 {
-    playButton.setButtonText (audioProcessor.isPreviewPlaying() ? "Pause" : "Play");
-    loopPointButton.setButtonText (audioProcessor.hasPendingLoopStart() ? "Set loop end" : "Set loop start");
+    const auto snapshot = audioProcessor.getEditorSnapshot();
+
+    refreshPlaybackState (snapshot);
+    syncSelectedSlotControls (snapshot);
+    refreshSlotButtons (snapshot);
+    controlsSyncedToSelectedSlot = snapshot.selectedSlot;
+}
+
+void FronasmaskinenAudioProcessorEditor::refreshPlaybackState (const FronasmaskinenAudioProcessor::EditorSnapshot& snapshot)
+{
+    playButton.setButtonText (snapshot.previewPlaying ? "Pause" : "Play");
+    loopPointButton.setButtonText (snapshot.pendingLoopStartActive ? "Set loop end" : "Set loop start");
     loadButton.setEnabled (true);
-    playButton.setEnabled (audioProcessor.hasSample());
-    loopPointButton.setEnabled (audioProcessor.hasSample() && audioProcessor.isPreviewPlaying() && ! audioProcessor.hasPreviewLoop());
-    releaseButton.setEnabled (audioProcessor.hasPreviewLoop());
-    randomButton.setEnabled (audioProcessor.hasPreviewLoop());
-
-    syncSelectedSlotControls();
-
-    const auto selected = audioProcessor.getSelectedSlotIndex();
-
-    for (int i = 0; i < FronasmaskinenAudioProcessor::slotCount; ++i)
-    {
-        const auto slot = audioProcessor.getSlot (i);
-        const auto text = "S" + juce::String (i + 1) + "\n" + audioProcessor.describeSlot (i);
-        slotButtons[(size_t) i].setButtonText (text);
-        slotButtons[(size_t) i].setColour (juce::TextButton::buttonColourId,
-                                           selected == i ? juce::Colour::fromRGB (54, 116, 104)
-                                                         : juce::Colour::fromRGB (48, 52, 56));
-        moveLeftButtons[(size_t) i].setEnabled (slot.filled && i > 0 && audioProcessor.getSlot (i - 1).filled);
-        moveRightButtons[(size_t) i].setEnabled (slot.filled && i < FronasmaskinenAudioProcessor::slotCount - 1
-                                                 && audioProcessor.getSlot (i + 1).filled);
-        clearButtons[(size_t) i].setEnabled (slot.filled);
-    }
+    playButton.setEnabled (snapshot.hasSample);
+    loopPointButton.setEnabled (snapshot.hasSample && snapshot.previewPlaying && ! snapshot.previewLoopActive);
+    releaseButton.setEnabled (snapshot.previewLoopActive);
+    randomButton.setEnabled (snapshot.previewLoopActive);
 }
 
-void FronasmaskinenAudioProcessorEditor::updateRangeFromSample()
+void FronasmaskinenAudioProcessorEditor::refreshSlotButtons (const FronasmaskinenAudioProcessor::EditorSnapshot& snapshot)
 {
-    const auto duration = juce::jmax (0.25, audioProcessor.getSampleDurationSeconds());
-    startSlider.setRange (0.0, duration, 0.001);
-    endSlider.setRange (0.0, duration, 0.001);
-    startSlider.setTextValueSuffix (" s");
-    endSlider.setTextValueSuffix (" s");
+    slotStrip.refresh (snapshot);
 }
 
-void FronasmaskinenAudioProcessorEditor::syncSelectedSlotControls()
+void FronasmaskinenAudioProcessorEditor::syncSelectedSlotControls (const FronasmaskinenAudioProcessor::EditorSnapshot& snapshot)
 {
-    const auto selected = audioProcessor.getSelectedSlotIndex();
+    const auto selected = snapshot.selectedSlot;
     const auto hasSelected = selected >= 0;
 
     startTrimSlider.setEnabled (hasSelected);
@@ -447,10 +738,11 @@ void FronasmaskinenAudioProcessorEditor::syncSelectedSlotControls()
         decaySlider.setValue (0.0, juce::dontSendNotification);
         sustainSlider.setValue (1.0, juce::dontSendNotification);
         releaseSlider.setValue (0.012, juce::dontSendNotification);
+        adsrDisplay.setAdsr (0.012, 0.0, 1.0f, 0.012, false);
         return;
     }
 
-    const auto slot = audioProcessor.getSlot (selected);
+    const auto slot = snapshot.slots[(size_t) selected];
     startTrimSlider.setValue (slot.startTrimSeconds, juce::dontSendNotification);
     endTrimSlider.setValue (slot.endTrimSeconds, juce::dontSendNotification);
     fadeSlider.setValue (slot.fadeSeconds, juce::dontSendNotification);
@@ -459,4 +751,5 @@ void FronasmaskinenAudioProcessorEditor::syncSelectedSlotControls()
     decaySlider.setValue (slot.decaySeconds, juce::dontSendNotification);
     sustainSlider.setValue (slot.sustainLevel, juce::dontSendNotification);
     releaseSlider.setValue (slot.releaseSeconds, juce::dontSendNotification);
+    adsrDisplay.setAdsr (slot.attackSeconds, slot.decaySeconds, slot.sustainLevel, slot.releaseSeconds, true);
 }
