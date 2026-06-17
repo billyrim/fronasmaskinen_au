@@ -148,6 +148,13 @@ void FronasmaskinenAudioProcessor::noteOn (int noteNumber, float velocity)
     activateLoopFromSelectedSlot();
     preview.positionSamples = preview.loopStartSeconds * sampleBufferRate;
     lastTriggeredSlot.store (slotIndex);
+
+    if (preview.playing && ! preview.releasing)
+    {
+        releaseAllVoices();
+        return;
+    }
+
     startVoice (slotIndex, noteNumber, velocity);
 }
 
@@ -883,8 +890,34 @@ void FronasmaskinenAudioProcessor::setSelectedSlotTrim (double startTrimSeconds,
     if (! slot.filled)
         return;
 
-    slot.startTrimSeconds = startTrimSeconds;
-    slot.endTrimSeconds = endTrimSeconds;
+    const auto duration = getSampleDurationSeconds();
+    if (duration <= minLoopSeconds)
+        return;
+
+    constexpr double trimChangeEpsilon = 0.0000001;
+    const auto startChanged = std::abs (startTrimSeconds - slot.startTrimSeconds) > trimChangeEpsilon;
+    const auto endChanged = std::abs (endTrimSeconds - slot.endTrimSeconds) > trimChangeEpsilon;
+
+    if (startChanged && ! endChanged)
+    {
+        const auto endSeconds = clampDouble (slot.baseEndSeconds + slot.endTrimSeconds, minLoopSeconds, duration);
+        const auto startSeconds = clampDouble (slot.baseStartSeconds + startTrimSeconds, 0.0, endSeconds - minLoopSeconds);
+        slot.startTrimSeconds = startSeconds - slot.baseStartSeconds;
+    }
+    else if (endChanged && ! startChanged)
+    {
+        const auto startSeconds = clampDouble (slot.baseStartSeconds + slot.startTrimSeconds, 0.0, duration - minLoopSeconds);
+        const auto endSeconds = clampDouble (slot.baseEndSeconds + endTrimSeconds, startSeconds + minLoopSeconds, duration);
+        slot.endTrimSeconds = endSeconds - slot.baseEndSeconds;
+    }
+    else
+    {
+        const auto startSeconds = clampDouble (slot.baseStartSeconds + startTrimSeconds, 0.0, duration - minLoopSeconds);
+        const auto endSeconds = clampDouble (slot.baseEndSeconds + endTrimSeconds, startSeconds + minLoopSeconds, duration);
+        slot.startTrimSeconds = startSeconds - slot.baseStartSeconds;
+        slot.endTrimSeconds = endSeconds - slot.baseEndSeconds;
+    }
+
     activateLoopFromSelectedSlot();
 }
 

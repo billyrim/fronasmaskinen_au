@@ -400,8 +400,7 @@ void testLoadingNewSampleResetsMicroloopState()
 
     processor.setSelection (0.10, 0.18);
     expect (processor.saveSelectionToSlot (0), "Should save a loop from the first sample");
-    processor.playPreview();
-    processMidiNote (processor, FronasmaskinenAudioProcessor::baseNote, true);
+    processor.auditionSelectedSlot();
     expect (processor.getActiveVoiceCount() > 0, "First sample loop should start a voice");
 
     expect (processor.loadAudioFile (secondSample), "Loading a replacement sample should succeed");
@@ -589,6 +588,32 @@ void testSlotTrimAndGainPersistence()
     sample.deleteFile();
 }
 
+void testStartTrimClampsBeforeLoopEnd()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createTestSample();
+    expect (processor.loadAudioFile (sample), "Sample should load");
+
+    processor.setSelection (0.10, 0.20);
+    expect (processor.saveSelectionToSlot (0), "Should save S1");
+
+    processor.setSelectedSlotTrim (0.50, 0.0);
+    auto slot = processor.getSlot (0);
+    expectNear (slot.startTrimSeconds, 0.08, epsilon, "Start trim should clamp before the loop end");
+    expectNear (slot.endTrimSeconds, 0.0, epsilon, "Clamping start trim should not move end trim");
+    expectNear (processor.getPreviewLoopStartSeconds(), 0.18, epsilon, "Preview loop start should stop before loop end");
+    expectNear (processor.getPreviewLoopEndSeconds(), 0.20, epsilon, "Preview loop end should stay fixed while dragging start trim");
+
+    processor.setSelectedSlotTrim (slot.startTrimSeconds, -0.50);
+    slot = processor.getSlot (0);
+    expectNear (slot.startTrimSeconds, 0.08, epsilon, "Clamping end trim should not move start trim");
+    expectNear (slot.endTrimSeconds, 0.0, epsilon, "End trim should clamp before it crosses start trim");
+    expectNear (processor.getPreviewLoopStartSeconds(), 0.18, epsilon, "Preview loop start should stay fixed while dragging end trim");
+    expectNear (processor.getPreviewLoopEndSeconds(), 0.20, epsilon, "Preview loop end should stay after loop start");
+
+    sample.deleteFile();
+}
+
 void testSlotAdsrShapesMidiVoiceWithoutLoopRetrigger()
 {
     auto processor = FronasmaskinenAudioProcessor();
@@ -620,6 +645,39 @@ void testSlotAdsrShapesMidiVoiceWithoutLoopRetrigger()
 
     expect (releaseStartPeak > 0.01f, "ADSR release should keep the voice audible after note-off");
     expect (releaseEndPeak < releaseStartPeak * 0.40f, "ADSR release should fade the voice after note-off");
+
+    sample.deleteFile();
+}
+
+void testMidiTriggerWhilePreviewPlaysDoesNotLayerVoice()
+{
+    auto processor = FronasmaskinenAudioProcessor();
+    const auto sample = createSlotSwitchSample();
+    expect (processor.loadAudioFile (sample), "Sample should load");
+    processor.prepareToPlay (44100.0, 2048);
+
+    processor.setSelection (0.10, 0.20);
+    expect (processor.saveSelectionToSlot (0), "Should save S1");
+    processor.setSelectedSlotFadeSeconds (0.002);
+    processor.playPreview();
+
+    (void) renderPreviewRms (processor);
+    const auto previewRms = renderPreviewRms (processor);
+
+    juce::AudioBuffer<float> buffer (2, 2048);
+    juce::MidiBuffer midi;
+    midi.addEvent (juce::MidiMessage::noteOn (1, FronasmaskinenAudioProcessor::baseNote, 100.0f / 127.0f), 0);
+    processor.processBlock (buffer, midi);
+
+    const auto triggeredRms = buffer.getRMSLevel (0, 0, buffer.getNumSamples());
+    expect (processor.getLastTriggeredSlot() == 0, "MIDI note-on should still retrigger the selected slot");
+    expect (processor.getSelectedSlotIndex() == 0, "MIDI note-on should keep the triggered slot selected");
+    expect (processor.getActiveVoiceCount() == 0, "MIDI note-on during preview playback should not layer a voice");
+    expect (triggeredRms < previewRms * 1.05f,
+            "MIDI note-on during preview playback should not boost loop level, preview "
+                + juce::String (previewRms, 6)
+                + " triggered "
+                + juce::String (triggeredRms, 6));
 
     sample.deleteFile();
 }
@@ -940,7 +998,7 @@ void testClearingSelectedSlotStopsItsLoopAndVoice()
     processor.setSelection (0.10, 0.20);
     expect (processor.saveSelectionToSlot (0), "Should save S1");
     processor.playPreview();
-    processMidiNote (processor, FronasmaskinenAudioProcessor::baseNote, true);
+    processor.auditionSelectedSlot();
     expect (processor.getSelectedSlotIndex() == 0, "S1 should be selected before clear");
     expect (processor.hasPreviewLoop(), "S1 loop should be active before clear");
     expect (processor.getActiveVoiceCount() > 0, "S1 voice should be active before clear");
@@ -1298,7 +1356,10 @@ int main()
         runTest ("preview playback without loop does not clip", testPreviewPlaybackWithoutLoopDoesNotClip);
         runTest ("loop point creation snaps to nearby smooth seam", testLoopPointCreationSnapsToNearbySmoothSeam);
         runTest ("slot trim and gain persistence", testSlotTrimAndGainPersistence);
+        runTest ("start trim clamps before loop end", testStartTrimClampsBeforeLoopEnd);
         runTest ("slot ADSR shapes MIDI voice without loop retrigger", testSlotAdsrShapesMidiVoiceWithoutLoopRetrigger);
+        runTest ("MIDI trigger while preview plays does not layer voice",
+                 testMidiTriggerWhilePreviewPlaysDoesNotLayerVoice);
         runTest ("legacy state uses slot fade as default ADSR", testLegacyStateUsesSlotFadeAsDefaultAdsr);
         runTest ("processor state round trip restores sample slots and selected loop",
                  testProcessorStateRoundTripRestoresSampleSlotsAndSelectedLoop);
